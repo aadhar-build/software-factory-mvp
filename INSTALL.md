@@ -28,11 +28,11 @@ factory/checks.sh
    - `automerge_allowlist`: only what is safe to merge unseen (docs, tests, and similar). Owner approves this list.
    - `base_branch`, `merge_method`.
 3. **`AGENTS.md`:** the target's rules; per-folder rule files where folders need their own (data, evals, agent).
-4. **`.gitignore`:** add `factory/jobs/` and `.worktrees/`.
+4. **`.gitignore`:** add `factory/jobs/` and `.worktrees/`. Check that broad ignores (like `*.csv` to keep data out) don't also block test fixtures, and tell the spec writer in AGENTS.md how fixtures should be stored.
 5. **Labels:** `factory/bin/job labels`.
 
 ## Verify
 
-- `bash factory/checks.sh` passes on the base branch.
+- `bash factory/checks.sh` passes on the base branch. With Python 3.12+, `unittest` exits non-zero when it finds no tests, so a new repo needs at least one smoke test before the first job.
 - `factory/bin/job list` prints `no jobs`.
 - Report what was copied, what was adapted, and the allowlist for the owner to confirm.

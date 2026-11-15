@@ -137,7 +137,7 @@ def cmd_worktree(root: Path, cfg: dict, args: list[str]) -> str:
     if wt.exists():
         return f"exists {job['worktree']}"
     base = cfg["base_branch"]
-    F.run(["git", "fetch", "--quiet", "origin", base], cwd=root)
+    F.fetch_base(root, base)
     F.run(["git", "worktree", "add", "-b", job["branch"], str(wt), f"origin/{base}"], cwd=root)
     return f"worktree {job['worktree']} on {job['branch']}"
 
@@ -205,7 +205,7 @@ def cmd_merge(root: Path, cfg: dict, args: list[str]) -> str:
         raise F.FactoryError(f"job is in {job['stage']}, not merging")
     wt = root / job["worktree"]
     base = cfg["base_branch"]
-    F.run(["git", "fetch", "--quiet", "origin", base], cwd=wt)
+    F.fetch_base(wt, base)
     merged = F.run(["git", "merge", "--no-edit", f"origin/{base}"], cwd=wt, check=False)
     if "CONFLICT" in merged:
         F.run(["git", "merge", "--abort"], cwd=wt, check=False)
