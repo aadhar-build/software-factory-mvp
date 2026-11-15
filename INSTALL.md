@@ -29,7 +29,7 @@ factory/checks.sh
    - `base_branch`, `merge_method`.
 3. **`AGENTS.md`:** the target's rules; per-folder rule files where folders need their own (data, evals, agent).
 4. **`.gitignore`:** add `factory/jobs/` and `.worktrees/`.
-5. **Labels:** `gh label create factory`, `factory:needs-info`, `factory:needs-human`, `factory:escaped`.
+5. **Labels:** `factory/bin/job labels`.
 
 ## Verify
 

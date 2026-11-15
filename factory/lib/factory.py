@@ -253,3 +253,40 @@ def changed_files(worktree: Path, base: str) -> list[str]:
     run(["git", "fetch", "--quiet", "origin", base], cwd=worktree, check=False)
     out = run(["git", "diff", "--name-only", f"origin/{base}...HEAD"], cwd=worktree)
     return [line for line in out.splitlines() if line.strip()]
+
+
+# --------------------------------------------------------------------------
+# GitHub, through the REST API only (`gh api`). High-level `gh issue`/`gh pr`
+# commands use GraphQL, which some sandboxes (including Claude Code cloud
+# sessions) block, so the factory never depends on them.
+# --------------------------------------------------------------------------
+
+
+def repo_slug(root: Path) -> str:
+    url = run(["git", "remote", "get-url", "origin"], cwd=root).strip()
+    m = re.search(r"github\.com[:/]+([^/]+/[^/]+?)(?:\.git)?/?$", url)
+    if not m:
+        raise FactoryError(f"origin is not a GitHub repo: {url}")
+    return m.group(1)
+
+
+def gh_api(root: Path, method: str, path: str, fields: dict | None = None, check: bool = True):
+    """Call the GitHub REST API for this repo. `path` is relative to repos/<owner>/<repo>."""
+    cmd = ["gh", "api", "-X", method, f"repos/{repo_slug(root)}/{path}" if path else f"repos/{repo_slug(root)}"]
+    for key, value in (fields or {}).items():
+        if isinstance(value, list):
+            for v in value:
+                cmd += ["-f", f"{key}[]={v}"]
+        elif isinstance(value, bool):
+            cmd += ["-F", f"{key}={'true' if value else 'false'}"]
+        else:
+            cmd += ["-f", f"{key}={value}"]
+    out = run(cmd, check=check)
+    try:
+        return json.loads(out) if out.strip() else None
+    except json.JSONDecodeError:
+        return None
+
+
+def gh_user() -> str:
+    return run(["gh", "api", "user", "--jq", ".login"], check=False).strip()
