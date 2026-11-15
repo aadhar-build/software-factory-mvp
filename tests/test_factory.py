@@ -151,6 +151,20 @@ class TestGateEndToEnd(unittest.TestCase):
         self.gate(job_id)
         self.assertIn("Protected paths changed", (d / "round-1" / "checks.md").read_text())
 
+    def test_stacked_job_counts_only_its_own_changes(self):
+        job_id, d, wt = self.make_job("- src/c.py")
+        sh(f"git branch factory/000-upstream origin/main", self.root)
+        up_wt = self.root / ".worktrees" / "up"
+        sh(f"git worktree add -q {up_wt} factory/000-upstream", self.root)
+        self.commit(up_wt, "src/b.py", "y = 1\n")
+        sh(f"git -C {wt} reset -q --hard factory/000-upstream", self.root)
+        job = F.read_job(d)
+        job["stacked_on_branch"] = "factory/000-upstream"
+        F.write_job(d, job)
+        self.commit(wt, "src/c.py", "z = 1\n")
+        self.assertEqual(F.changed_files(wt, "main", job), ["src/c.py"])
+        self.assertTrue(self.gate(job_id).endswith("gate PASS"))
+
     def test_failing_checks_fail(self):
         job_id, d, wt = self.make_job("- src/a.py")
         self.commit(wt, "src/a.py", "BROKEN\n")

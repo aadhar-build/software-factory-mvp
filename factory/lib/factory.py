@@ -259,9 +259,16 @@ def fetch_base(cwd: Path, base: str) -> None:
     run(["git", "fetch", "--quiet", "origin", f"+refs/heads/{base}:refs/remotes/origin/{base}"], cwd=cwd)
 
 
-def changed_files(worktree: Path, base: str) -> list[str]:
+def start_ref(job: dict, base: str) -> str:
+    """What the job's own changes are measured against: the base, or the job it is stacked on."""
+    return job.get("stacked_on_branch") or f"origin/{base}"
+
+
+def changed_files(worktree: Path, base: str, job: dict | None = None) -> list[str]:
+    """Files this job changed. For a stacked job, the upstream job's changes don't count."""
     fetch_base(worktree, base)
-    out = run(["git", "diff", "--name-only", f"origin/{base}...HEAD"], cwd=worktree)
+    start = start_ref(job or {}, base)
+    out = run(["git", "diff", "--name-only", f"{start}...HEAD"], cwd=worktree)
     return [line for line in out.splitlines() if line.strip()]
 
 

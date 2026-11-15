@@ -51,6 +51,8 @@ Follow the job's `stage` (from `job show <id>`); each step moves it on.
 
 When a job reaches `merged`, `rejected`, `needs-human` or `needs-info`, start the next one in the queue.
 
+**Dependent issues.** If an issue needs code from a job that is waiting on a human (its PR not merged yet), stack it: `job worktree <id> --on <upstream-id>`. The new branch starts from the upstream branch, the gate and reviewers judge only the new job's own changes, and its PR targets the upstream branch. `job merge` refuses to merge a stacked job until its upstream PR is merged. Give agents `Base: <upstream branch>` in their prompt header for a stacked job.
+
 ## Feedback from the owner
 
 - **Change an escalated PR:** save their words verbatim to `<job folder>/feedback-<k>.md`, then `job advance <id> build` and continue at step 4.
