@@ -1,7 +1,9 @@
 # Glossary
 
 - **Job**: one issue's trip through the factory, in `factory/jobs/<id>/`. Its `job.json` is written only by `factory/bin/job`.
-- **Stage**: where a job is: intake, spec, build, gate, review, approve, merging, recovery, needs-info, needs-human, merged, rejected.
+- **Stage**: where a job is: intake, spec, build, gate, review, approve, merging, recovery, needs-info, needs-input, needs-human, merged, rejected.
+- **Clarify phase**: intake and spec only. It ends when the spec has no open product question (`job clarify`); open questions go on the issue with the `needs-input` label.
+- **Build phase**: build, gate, review, approve and PR. It never starts while a product question is open.
 - **Round**: one build plus its gate and reviews. A job gets `max_rounds` rounds before recovery.
 - **Gate**: the scripted check after each build: protected paths, spec scope, `factory/checks.sh`.
 - **Protected path**: a file agents may never change (checks, factory config, eval thresholds, gold labels, data splits, policies).
