@@ -1,0 +1,11 @@
+# Glossary
+
+- **Job**: one issue's trip through the factory, in `factory/jobs/<id>/`. Its `job.json` is written only by `factory/bin/job`.
+- **Stage**: where a job is: intake, spec, build, gate, review, approve, merging, recovery, needs-info, needs-human, merged, rejected.
+- **Round**: one build plus its gate and reviews. A job gets `max_rounds` rounds before recovery.
+- **Gate**: the scripted check after each build: protected paths, spec scope, `factory/checks.sh`.
+- **Protected path**: a file agents may never change (checks, factory config, eval thresholds, gold labels, data splits, policies).
+- **Seam**: the public boundary a test runs against. The spec names the seams; the builder tests only there.
+- **Blast radius**: what a change can break. `job merge` merges unseen only what is on the auto-merge allowlist.
+- **Stacked job**: a job whose branch starts from another job's unmerged branch.
+- **Owner**: the person who adds the `factory` label, merges what the factory hands over, and makes the product calls.

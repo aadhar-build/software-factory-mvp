@@ -64,6 +64,49 @@ class TestParsing(unittest.TestCase):
         self.assertEqual(F.make_job_id(7, "Load the Twitter dataset!"), "007-load-the-twitter-dataset")
 
 
+class TestPrText(unittest.TestCase):
+    SPEC = ("## Summary\n- Load the CSV in chunks\n\n## Problem statement\nThe loader runs out of memory on the full file.\n\n"
+            "## Behaviour\nx\n")
+    BUILD = ("## Summary\n- done\n\n## Acceptance criteria\n1. Loads 3M rows: met, test_big passed\n"
+             "2. Keeps the row order: met, test_order passed\n3. Logs progress: not met, no log yet\n\n## Commands run\nok\n")
+
+    def job(self, **extra):
+        job = F.new_job("007-load-csv", 7, "Load the CSV in chunks")
+        job.update(extra)
+        return job
+
+    def test_body_leads_with_the_problem_then_the_fix_then_proof(self):
+        body = F.pr_body(self.job(), self.SPEC, self.BUILD)
+        problem = body.index("The loader runs out of memory on the full file.")
+        fix = body.index("- Load the CSV in chunks")
+        proof = body.index("2 of 3 acceptance criteria met")
+        self.assertLess(problem, fix)
+        self.assertLess(fix, proof)
+        self.assertTrue(body.startswith("The loader runs out of memory"))
+        self.assertIn("Closes #7", body)
+        self.assertIn("`007-load-csv`", body)
+
+    def test_body_without_problem_statement_or_build_notes(self):
+        body = F.pr_body(self.job(), "## Summary\n- Load the CSV in chunks\n", "")
+        self.assertTrue(body.startswith("- Load the CSV in chunks"))
+        self.assertIn("no build notes", body)
+        self.assertIn("Closes #7", body)
+
+    def test_stacked_body_names_the_upstream_pr(self):
+        body = F.pr_body(self.job(stacked_on_pr=5, stacked_on_branch="factory/005-x"), self.SPEC, self.BUILD,
+                         base_branch="main")
+        self.assertIn("Stacked on #5", body)
+        self.assertIn("`main`", body)
+
+    def test_comment_opens_with_one_robot_note_and_no_footer(self):
+        text = F.agent_comment("**Factory intake: ACCEPT**\n\nok", "Aadhar")
+        self.assertTrue(text.startswith("> [!NOTE]\n> 🤖 **"))
+        self.assertIn("on behalf of Aadhar**", text.splitlines()[1])
+        self.assertTrue(text.endswith("**Factory intake: ACCEPT**\n\nok"))
+        self.assertNotIn("---", text)
+        self.assertEqual(text.count("🤖"), 1)
+
+
 class TestPathRules(unittest.TestCase):
     def test_protected(self):
         prot = ["factory/", ".claude/", "AGENTS.md"]

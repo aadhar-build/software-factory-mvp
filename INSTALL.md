@@ -11,8 +11,10 @@ For a coding agent installing this factory into a target repo. Copy what's gener
 ## Copy, unchanged
 
 ```
-.claude/skills/factory/SKILL.md
+.claude/skills/*            the orchestrator and the vendored skills (keep THIRD_PARTY_NOTICES.md with them)
 .claude/agents/*.md
+THIRD_PARTY_NOTICES.md
+docs/agents/*.md
 .claude/settings.json
 factory/bin/job  factory/bin/gate  factory/bin/route
 factory/lib/factory.py
@@ -26,10 +28,11 @@ factory/checks.sh
 2. **`factory/config.json`:**
    - `protected_paths`: add the target's goalposts (eval thresholds, gold labels, data splits and seeds, policy rules, holdout scenarios).
    - `automerge_allowlist`: only what is safe to merge unseen (docs, tests, and similar). Owner approves this list.
-   - `base_branch`, `merge_method`.
+   - `base_branch`, `merge_method`, and `owner_name` (shown in the 🤖 note on every comment the factory posts).
 3. **`AGENTS.md`:** the target's rules; per-folder rule files where folders need their own (data, evals, agent).
 4. **`.gitignore`:** add `factory/jobs/` and `.worktrees/`. Check that broad ignores (like `*.csv` to keep data out) don't also block test fixtures, and tell the spec writer in AGENTS.md how fixtures should be stored.
 5. **Labels:** `factory/bin/job labels`.
+6. **`CLAUDE.md` and `GLOSSARY.md`:** add the `## Agent skills` block from this repo's `CLAUDE.md`, and start a `GLOSSARY.md` with the target's own domain words.
 
 ## Verify
 
