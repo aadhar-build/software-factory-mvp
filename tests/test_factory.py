@@ -107,6 +107,65 @@ class TestPrText(unittest.TestCase):
         self.assertEqual(text.count("🤖"), 1)
 
 
+class TestScorecard(unittest.TestCase):
+    def job(self, job_id, history, rnd=1, **extra):
+        job = F.new_job(job_id, 1, "x")
+        job["history"] = [{"at": at, "stage": st, "note": note} for at, st, note in history]
+        job["stage"] = job["history"][-1]["stage"]
+        job["round"] = rnd
+        job.update(extra)
+        return job
+
+    ESCALATED = [("2026-11-15T21:00:00Z", "intake", "created"), ("2026-11-15T21:01:00Z", "spec", ""),
+                 ("2026-11-15T21:02:00Z", "build", ""), ("2026-11-15T21:05:00Z", "gate", ""),
+                 ("2026-11-15T21:05:00Z", "review", "gate passed"), ("2026-11-15T21:06:00Z", "approve", ""),
+                 ("2026-11-15T21:10:00Z", "needs-human", "approver escalated"),
+                 ("2026-11-16T07:10:00Z", "merged", "merged by the owner")]
+    AUTO = [("2026-11-20T10:00:00Z", "intake", "created"), ("2026-11-20T10:02:00Z", "spec", ""),
+            ("2026-11-20T10:04:00Z", "build", ""), ("2026-11-20T10:10:00Z", "gate", ""),
+            ("2026-11-20T10:10:00Z", "build", "gate failed"), ("2026-11-20T10:16:00Z", "gate", ""),
+            ("2026-11-20T10:16:00Z", "review", "gate passed"), ("2026-11-20T10:18:00Z", "approve", ""),
+            ("2026-11-20T10:19:00Z", "merging", "approver approved"),
+            ("2026-11-20T10:20:00Z", "merged", "auto-merged")]
+
+    def test_one_job(self):
+        m = F.job_metrics(self.job("001-a", self.ESCALATED))
+        self.assertEqual(m["agent_minutes"], 10.0)
+        self.assertEqual(m["lead_hours"], 10.17)
+        self.assertTrue(m["first_pass_gate"])
+        self.assertTrue(m["escalated"])
+        self.assertFalse(m["auto_merged"])
+        self.assertTrue(m["merged"])
+
+    def test_failed_gate_and_auto_merge(self):
+        m = F.job_metrics(self.job("002-b", self.AUTO, rnd=2))
+        self.assertFalse(m["first_pass_gate"])
+        self.assertTrue(m["auto_merged"])
+        self.assertEqual(m["agent_minutes"], 20.0)
+        self.assertEqual(m["rounds"], 2)
+
+    def test_cohorts_by_factory_version(self):
+        jobs = [self.job("001-a", self.ESCALATED),
+                self.job("002-b", self.AUTO, rnd=2, factory_version="v1.1-skills", escaped=True,
+                         owner_minutes=4),
+                self.job("003-c", self.ESCALATED[:2], factory_version="v1.1-skills")]
+        cards = F.scorecard(jobs)
+        self.assertEqual(set(cards), {"v1", "v1.1-skills"})
+        new = cards["v1.1-skills"]
+        self.assertEqual((new["jobs"], new["merged"]), (2, 1))
+        self.assertEqual(new["first_pass_gate"], (0, 1))
+        self.assertEqual(new["change_fail"], (1, 1))
+        self.assertEqual(new["owner_minutes_median"], 4)
+        self.assertEqual(cards["v1"]["escalated"], (1, 1))
+
+    def test_render_compares_against_baseline_and_flags_small_samples(self):
+        jobs = [self.job("002-b", self.AUTO, rnd=2, factory_version="v1.1-skills")]
+        baseline = {"version": "v1", "jobs": 4, "merged": 4, "first_pass_gate": [4, 4]}
+        text = F.render_scorecard(F.scorecard(jobs), baseline)
+        self.assertIn("| First-pass gate | 4 of 4 (100%) | 0 of 1 (0%) |", text)
+        self.assertIn("directional", text)
+
+
 class TestPathRules(unittest.TestCase):
     def test_protected(self):
         prot = ["factory/", ".claude/", "AGENTS.md"]

@@ -26,6 +26,10 @@ issue labelled `factory` → intake → route → spec → build (tests first)
 
 Planning to build uses [Matt Pocock's skills](https://github.com/mattpocock/skills): `grill-me`, `to-spec` and `to-tickets` for the owner's planning, `triage` in intake, `to-spec` in the spec, `tdd` in the builder, and his two-axis review in `reviewer-code`. Build to ship uses [tstack](https://github.com/t3dotgg/tstack): `file-pr` for PR descriptions, `leaving-pr-comments` for every comment, `babysit-pr` for CI, and `full-stop` as the factory's default stopping point. Both are MIT and copied unchanged; `docs/agents/skills.md` says where each one sits and where the factory's rules override it.
 
+## Is it getting better?
+
+`factory/bin/scorecard` groups every job by the factory version that ran it and sets it beside a frozen baseline. `factory/baseline-v1.json` holds v1's numbers from its first 4 jobs (15 Nov 2026), taken before the planning and shipping skills were added; jobs started since then are tagged `v1.1-skills`. Under 10 jobs a column, read the comparison as directional only.
+
 ## What's in v1
 
 ```
