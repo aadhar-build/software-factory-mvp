@@ -9,15 +9,22 @@ A coding-agent software factory for Claude Code: GitHub issues in, specced, test
 Code owns the loop; agents do the judging. Small deterministic scripts run job state, gates, routing and merging. Agents decide only what scripts can't: whether an issue is worth building, the spec, the code, and the review.
 
 ```
-issue labelled `factory` → intake → route → spec → build (tests first)
-  → gate (checks, scope, eval smoke) → parallel reviewers → ≤2 fix rounds
-  → recovery → approver → auto-merge only if on the blast-radius allowlist
+clarify lane:  issue labelled `factory` → intake → spec → product questions?
+                 yes → posted on the issue, label `needs-input`, wait for the owner
+                 no  → ready
+build lane:    ready → pickup (re-spec if main moved) → build (tests first)
+                 → gate (checks, scope, eval smoke) → parallel reviewers → ≤2 fix rounds
+                 → recovery → approver → auto-merge only if on the blast-radius allowlist
 ```
+
+The two lanes run side by side. While one issue builds, others are being specced and their questions are waiting for the owner. The build lane refuses to start while a spec has an open product question, so nothing is built on a guess about policy, metrics, thresholds or copy. Technical questions never stop a job: the agents ask a second model (Astra, with Fable as tiebreaker) and log the answer.
 
 ## What makes it trustworthy
 
 - **Hidden holdout scenarios:** the builder never sees the scenarios it is graded on.
+- **Product questions go to the owner before any code:** the spec lists them, each with a recommended answer, and the build is blocked until they're answered on the issue.
 - **Protected paths:** agents can't edit checks, eval thresholds, gold labels, data splits or policies.
+- **Every fix round is kept:** sending a job back for changes always starts a fresh round, and old reviews are never overwritten or counted twice.
 - **Auto-merge by blast radius, not confidence:** a written allowlist decides what merges without a human.
 - **Release is never automated.**
 - **The factory is evaluated too:** a weekly scorecard (first-pass gate rate, rounds per job, share auto-merged, escalation precision, cost per merged PR, escaped defects), and later a frozen benchmark of past issues.
@@ -28,29 +35,30 @@ Planning to build uses [Matt Pocock's skills](https://github.com/mattpocock/skil
 
 ## Is it getting better?
 
-`factory/bin/scorecard` groups every job by the factory version that ran it and sets it beside a frozen baseline. `factory/baseline-v1.json` holds v1's numbers from its first 4 jobs (15 Nov 2026), taken before the planning and shipping skills were added; jobs started since then are tagged `v1.1-skills`. Under 10 jobs a column, read the comparison as directional only.
+`factory/bin/scorecard` groups every job by the factory version that ran it and sets it beside a frozen baseline. `factory/baseline-v1.json` holds v1's numbers from its first 4 jobs (15 Nov 2026), taken before the planning and shipping skills were added; jobs since then are tagged `v1.1-skills`, and from 18 Nov `v1.2-two-phase` (clarify before build). Under 10 jobs a column, read the comparison as directional only.
 
-## What's in v1
+## What's in it
 
 ```
 .claude/skills/factory/SKILL.md   the orchestrator: queue, pipeline, guardrails
 .claude/agents/                   intake, spec-writer, builder, reviewer-code,
                                   reviewer-eval, reviewer-security, approver
 .claude/settings.json             blocks destructive git, direct merges, releases, gists
-factory/bin/job                   the only writer of job state; refuses illegal moves; merges
+factory/bin/job                   the only writer of job state; refuses illegal moves; clarify,
+                                  answers, pickup, lane; merges
 factory/bin/gate                  protected paths, spec scope, checks.sh -> PASS/FAIL
 factory/bin/route                 risk + surfaces -> reviewers and models
-factory/config.json               rounds, routing, protected paths, auto-merge allowlist
+factory/config.json               lanes, rounds, routing, protected paths, auto-merge allowlist
 factory/checks.sh                 the target repo's real checks
 INSTALL.md                        how an agent installs it into a project
 tests/                            unit tests and an end-to-end gate test
 ```
 
-Not in v1 yet: hidden holdout scenarios and their verifier, the recovery agent (v1 hands exhausted jobs to a human), the eval smoke gate, and the weekly factory scorecard.
+Not built yet: hidden holdout scenarios and their verifier, the recovery agent (exhausted jobs go to a human), the eval smoke gate, and CI checks on every PR.
 
 ## Use
 
-Install it into a project ([INSTALL.md](INSTALL.md)), label issues `factory`, then in Claude Code run `/factory run`. Run the tests with `python3 -m unittest discover -s tests -t .`.
+Install it into a project ([INSTALL.md](INSTALL.md)), label issues `factory`, then in Claude Code run `/factory run` (both lanes), or `/factory clarify` / `/factory build` for one. Answer the questions on any issue labelled `needs-input`, then remove the label. Run the tests with `python3 -m unittest discover -s tests -t .`.
 
 ## Credits
 
