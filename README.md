@@ -22,6 +22,10 @@ issue labelled `factory` → intake → route → spec → build (tests first)
 - **Release is never automated.**
 - **The factory is evaluated too:** a weekly scorecard (first-pass gate rate, rounds per job, share auto-merged, escalation precision, cost per merged PR, escaped defects), and later a frozen benchmark of past issues.
 
+## Skills it borrows
+
+Planning to build uses [Matt Pocock's skills](https://github.com/mattpocock/skills): `grill-me`, `to-spec` and `to-tickets` for the owner's planning, `triage` in intake, `to-spec` in the spec, `tdd` in the builder, and his two-axis review in `reviewer-code`. Build to ship uses [tstack](https://github.com/t3dotgg/tstack): `file-pr` for PR descriptions, `leaving-pr-comments` for every comment, `babysit-pr` for CI, and `full-stop` as the factory's default stopping point. Both are MIT and copied unchanged; `docs/agents/skills.md` says where each one sits and where the factory's rules override it.
+
 ## What's in v1
 
 ```
