@@ -29,9 +29,10 @@ factory/checks.sh
    - `protected_paths`: add the target's goalposts (eval thresholds, gold labels, data splits and seeds, policy rules, holdout scenarios).
    - `automerge_allowlist`: only what is safe to merge unseen (docs, tests, and similar). Owner approves this list.
    - `base_branch`, `merge_method`, and `owner_name` (shown in the 🤖 note on every comment the factory posts).
+   - `lanes`: how many jobs the clarify lane (specs and owner questions, no code) and the build lane run at once. Default 3 and 1.
 3. **`AGENTS.md`:** the target's rules; per-folder rule files where folders need their own (data, evals, agent).
 4. **`.gitignore`:** add `factory/jobs/` and `.worktrees/`. Check that broad ignores (like `*.csv` to keep data out) don't also block test fixtures, and tell the spec writer in AGENTS.md how fixtures should be stored.
-5. **Labels:** `factory/bin/job labels`.
+5. **Labels:** `factory/bin/job labels`. It creates `factory`, `needs-input` (the owner has questions to answer), `factory:needs-human` and `factory:escaped`.
 6. **`CLAUDE.md` and `GLOSSARY.md`:** add the `## Agent skills` block from this repo's `CLAUDE.md`, and start a `GLOSSARY.md` with the target's own domain words.
 
 ## Verify
