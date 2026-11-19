@@ -14,7 +14,11 @@ Each command prints one line, so the orchestrator's context stays small.
   job pr <id>                 push the branch; on the first round open a PR: problem, fix, proof, "Closes #n"
   job lane <clarify|build>    jobs that lane can work on now (not waiting on a human)
   job clarify <id>            clarify exit: open product questions -> needs-input; none -> ready
-  job pickup <id>             build entry: ready -> build, or back to spec if the base moved
+  job pickup <id>             build entry: ready -> build, or back to spec if the base moved;
+                              refuses while the job's phase (milestone) is still clarifying
+  job gap <id>                after a build: product gaps in build.md -> needs-input; none -> no change
+  job phase <phase>           what still holds a phase's build lane shut, or "open"
+  job sheet <phase>           every open question in a phase, with stable ids, as one message
   job answers <id>            needs-input -> spec once the owner answered and removed the label
   job tally <id>              read this round's reviews: approve | build | recovery
   job decide <id>             act on decision.md: merging | needs-human
@@ -78,6 +82,9 @@ def cmd_create(root: Path, cfg: dict, args: list[str]) -> str:
     _write_issue_md(root, d, issue, data)
     job = F.new_job(job_id, issue, data["title"])
     job["factory_version"] = cfg.get("version", F.BASE_VERSION)
+    if data.get("milestone"):
+        job["phase"] = data["milestone"]["title"]
+        job["phase_number"] = data["milestone"]["number"]
     F.write_job(d, job)
     return f"created {job_id}"
 
@@ -96,11 +103,17 @@ def cmd_lane(root: Path, cfg: dict, args: list[str]) -> str:
     want = args[0]
     if want not in ("clarify", "build"):
         raise F.FactoryError("lane must be clarify or build")
-    ids = []
+    ids, held = [], {}
     for p in sorted(F.jobs_dir(root).glob("*/job.json")):
         j = json.loads(p.read_text())
-        if F.lane(j["stage"]) == want and j["stage"] not in F.WAITING_STAGES:
-            ids.append(f"{j['id']}  {j['stage']}")
+        if F.lane(j["stage"]) != want or j["stage"] in F.WAITING_STAGES:
+            continue
+        if j["stage"] == "ready" and j.get("phase") and cfg.get("phase_gate"):
+            if j["phase"] not in held:
+                held[j["phase"]] = _phase_reasons(root, cfg, j["phase"], j.get("phase_number"))
+            if held[j["phase"]]:
+                continue
+        ids.append(f"{j['id']}  {j['stage']}")
     return "\n".join(ids) or f"nothing to do in the {want} lane"
 
 
@@ -215,13 +228,8 @@ def cmd_clarify(root: Path, cfg: dict, args: list[str]) -> str:
     open_qs = F.open_product_questions(text)
     label = _label(cfg, "needs_info")
     if open_qs:
-        section = F.section_text(text, "Product questions") or "\n".join(f"- [ ] {q}" for q in open_qs)
-        _comment(root, job["issue"],
-                 f"**Factory spec: {len(open_qs)} product question(s) before building**\n\n"
-                 f"{section}\n\nAnswer here, then remove the `{label}` label. "
-                 "The factory re-writes the spec with your answers and builds only when none are open.")
-        _add_label(root, job["issue"], label)
-        F.move(job, "needs-input", f"{len(open_qs)} product question(s) asked")
+        _ask(root, cfg, job, open_qs, "spec",
+             f"**Factory spec: {len(open_qs)} product question(s) before building**")
         F.write_job(d, job)
         return f"{job['id']} -> needs-input ({len(open_qs)} question(s))"
     _remove_label(root, job["issue"], label)
@@ -232,11 +240,95 @@ def cmd_clarify(root: Path, cfg: dict, args: list[str]) -> str:
     return f"{job['id']} -> ready (waiting for the build lane)"
 
 
+def _ask(root: Path, cfg: dict, job: dict, questions: list[str], source: str, title: str) -> None:
+    """Put one round of product questions on the issue, each with a stable id, and wait."""
+    label = _label(cfg, "needs_info")
+    ids = F.question_ids(job["issue"], questions)
+    when = ("This came up after the spec was cleared, so the build is paused until you answer."
+            if F.after_gate(job) else "")
+    items = "\n".join("- [ ] **{}**:{}".format(*q.split(":", 1)) for q in ids)
+    how = (f"Answer by id here (for example `{job['issue']}-Q1: yes`), then remove the `{label}` label. "
+           "The factory re-writes the spec with your answers.")
+    _comment(root, job["issue"], "\n\n".join(part for part in (title, items, when, how) if part))
+    _add_label(root, job["issue"], label)
+    F.record_ask(job, len(questions), source)
+    job["asks"][-1]["questions"] = ids
+    F.move(job, "needs-input", f"{len(questions)} product question(s) asked ({source})")
+
+
+def _phase_reasons(root: Path, cfg: dict, phase: str, number: int | None) -> list[str]:
+    """Everything holding a phase's build lane shut. [] means the phase may build."""
+    jobs = [json.loads(p.read_text()) for p in sorted(F.jobs_dir(root).glob("*/job.json"))]
+    reasons = [f"{jid} is still clarifying" for jid in F.phase_blockers(jobs, phase)]
+    if number is not None:
+        issues = F.gh_api(root, "GET", f"issues?milestone={number}&labels={_label(cfg, 'queue')}"
+                                       "&state=open&per_page=100") or []
+        have = {j["issue"] for j in jobs}
+        reasons += [f"issue #{i['number']} has no job yet" for i in issues
+                    if not i.get("pull_request") and i["number"] not in have]
+    cov = F.phases_dir(root) / F.slugify(phase, 6) / "coverage.md"
+    if not cov.exists():
+        reasons.append(f"no coverage check yet ({cov.relative_to(root)})")
+    else:
+        reasons += [f"not covered by any issue: {m}" for m in F.coverage_missing(cov.read_text())]
+    return reasons
+
+
+def cmd_phase(root: Path, cfg: dict, args: list[str]) -> str:
+    """What still holds a phase's build lane shut."""
+    phase = " ".join(args)
+    jobs = [json.loads(p.read_text()) for p in F.jobs_dir(root).glob("*/job.json")]
+    number = next((j.get("phase_number") for j in jobs if j.get("phase") == phase), None)
+    reasons = _phase_reasons(root, cfg, phase, number)
+    slug = F.slugify(phase, 6)
+    if reasons:
+        return f"phase {phase} ({slug}) is held:\n" + "\n".join(reasons)
+    return f"phase {phase} ({slug}): open, every spec is cleared"
+
+
+def cmd_sheet(root: Path, cfg: dict, args: list[str]) -> str:
+    """One message with every question a phase is waiting on, so the owner answers once."""
+    phase = " ".join(args)
+    lines = []
+    for p in sorted(F.jobs_dir(root).glob("*/job.json")):
+        j = json.loads(p.read_text())
+        if j.get("phase") != phase or j["stage"] != "needs-input" or not j.get("asks"):
+            continue
+        lines += ["", f"**#{j['issue']} {j['title']}**"] + [f"- {q}" for q in j["asks"][-1].get("questions", [])]
+    cov = F.phases_dir(root) / F.slugify(phase, 6) / "coverage.md"
+    missing = F.coverage_missing(cov.read_text()) if cov.exists() else []
+    if missing:
+        lines += ["", "**Not covered by any issue in the phase**"]
+        lines += [f"- {F.slugify(phase, 6)}-M{k}: file an issue for {m}?" for k, m in enumerate(missing, 1)]
+    if not lines:
+        return f"phase {phase}: no open questions"
+    return f"Questions for phase {phase}. Answer by id; each issue's own answers go on that issue." + "\n".join(lines)
+
+
+def cmd_gap(root: Path, cfg: dict, args: list[str]) -> str:
+    """After a build round: a product decision the builder met that nothing settles stops the job."""
+    d, job = _load(root, args[0])
+    if job["stage"] != "build":
+        raise F.FactoryError(f"job {job['id']} is at {job['stage']}, not build")
+    build = d / "build.md"
+    gaps = F.open_product_gaps(build.read_text()) if build.exists() else []
+    if not gaps:
+        return f"{job['id']}: no product gaps"
+    _ask(root, cfg, job, gaps, "build",
+         f"**Factory build: {len(gaps)} product question(s) the spec didn't settle**")
+    F.write_job(d, job)
+    return f"{job['id']} -> needs-input ({len(gaps)} gap(s) found while building)"
+
+
 def cmd_pickup(root: Path, cfg: dict, args: list[str]) -> str:
     """Build lane entry. If the base moved since the spec was written, send it back to spec."""
     d, job = _load(root, args[0])
     if job["stage"] != "ready":
         raise F.FactoryError(f"job {job['id']} is at {job['stage']}, not ready")
+    if cfg.get("phase_gate") and job.get("phase"):
+        reasons = _phase_reasons(root, cfg, job["phase"], job.get("phase_number"))
+        if reasons:
+            raise F.FactoryError(f"phase {job['phase']} is not cleared to build: " + "; ".join(reasons))
     F.fetch_base(root, cfg["base_branch"])
     now = F.run(["git", "rev-parse", f"origin/{cfg['base_branch']}"], cwd=root).strip()
     if job.get("spec_base") and job["spec_base"] != now:
@@ -396,6 +488,7 @@ COMMANDS = {
     "create": (cmd_create, 1), "list": (cmd_list, 0), "lane": (cmd_lane, 1), "show": (cmd_show, 1),
     "advance": (cmd_advance, 2), "intake": (cmd_intake, 1), "worktree": (cmd_worktree, 1),
     "pr": (cmd_pr, 1), "clarify": (cmd_clarify, 1), "pickup": (cmd_pickup, 1), "answers": (cmd_answers, 1),
+    "gap": (cmd_gap, 1), "phase": (cmd_phase, 1), "sheet": (cmd_sheet, 1),
     "tally": (cmd_tally, 1), "decide": (cmd_decide, 1),
     "merge": (cmd_merge, 1), "reject": (cmd_reject, 1), "record": (cmd_record, 3),
 }
