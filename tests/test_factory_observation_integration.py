@@ -66,6 +66,30 @@ class FactoryCLI:
 
 
 class FactoryObservationIntegration(FactoryCLI, unittest.TestCase):
+    def test_legacy_record_rejects_invalid_values_without_mutating_state(self):
+        cases = [("escaped", "treu"), ("owner_changes", "FALSE"), ("owner_minutes", "unknown"),
+                 ("owner_minutes", "nan"), ("owner_minutes", "-1"), ("cost_usd", "inf"),
+                 ("cost_usd", "1e999"), ("cost_usd", "-0.01")]
+        for key, value in cases:
+            with self.subTest(key=key, value=value):
+                self.write_job(escaped=True, owner_changes=True, owner_minutes=5, cost_usd=2)
+                before = self.state.read_bytes()
+                result = self.cli("job", "record", JOB_ID, key, value, success=False)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("REFUSED:", result.stdout + result.stderr)
+                self.assertNotIn("Traceback", result.stdout + result.stderr)
+                self.assertEqual(self.state.read_bytes(), before)
+
+    def test_legacy_record_preserves_explicit_zero_and_false(self):
+        self.write_job()
+        for key, value in [("owner_minutes", "0"), ("cost_usd", "0"), ("escaped", "false"),
+                           ("owner_changes", "true")]:
+            self.cli("job", "record", JOB_ID, key, value)
+        state = json.loads(self.state.read_text())
+        self.assertEqual((state["owner_minutes"], state["cost_usd"]), (0, 0))
+        self.assertIs(state["escaped"], False)
+        self.assertIs(state["owner_changes"], True)
+
     def test_observe_retries_keep_the_first_ingestion_and_preserve_job_state(self):
         self.write_job()
         before = self.state.read_bytes()

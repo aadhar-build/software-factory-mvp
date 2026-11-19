@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import stat
 import sys
@@ -382,8 +383,24 @@ def cmd_labels(root: Path, cfg: dict, args: list[str]) -> str:
     return "labels created: " + (", ".join(made) or "none (already exist)")
 
 
-RECORDABLE = {"owner_minutes": float, "cost_usd": float,
-              "escaped": lambda v: v.lower() == "true", "owner_changes": lambda v: v.lower() == "true"}
+def _record_number(value: str) -> float:
+    try:
+        number = float(value)
+        if math.isfinite(number) and number >= 0:
+            return number
+    except ValueError:
+        pass
+    raise F.FactoryError("expected a finite nonnegative number")
+
+
+def _record_bool(value: str) -> bool:
+    if value not in ("true", "false"):
+        raise F.FactoryError("expected true or false")
+    return value == "true"
+
+
+RECORDABLE = {"owner_minutes": _record_number, "cost_usd": _record_number,
+              "escaped": _record_bool, "owner_changes": _record_bool}
 
 
 def cmd_record(root: Path, cfg: dict, args: list[str]) -> str:
