@@ -100,7 +100,7 @@ def reporting_job_dir(root: Path, job_id: str) -> Path:
 
 
 def valid_reporting_job_id(job_id: str) -> bool:
-    return re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", job_id) is not None
+    return re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", job_id) is not None
 
 
 def slugify(text: str, words: int = 4) -> str:

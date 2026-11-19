@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests.test_factory import F
+
 
 ROOT = Path(__file__).resolve().parents[1]
 JOB_ID = "001-example"
@@ -66,6 +68,43 @@ class FactoryCLI:
 
 
 class FactoryObservationIntegration(FactoryCLI, unittest.TestCase):
+    def test_report_and_observe_accept_long_ids_generated_by_the_controller(self):
+        for count, length in enumerate((167, 255), start=1):
+            with self.subTest(length=length):
+                identifier = F.make_job_id(1, "a" * (length - 4))
+                self.assertEqual(len(identifier), length)
+                self.write_job(stage="merged", id=identifier, branch=f"factory/{identifier}",
+                               worktree=f".worktrees/{identifier}")
+                folder = self.job_dir.rename(self.job_dir.with_name(identifier))
+                original = (folder / "job.json").read_bytes()
+                event = self.effort(job_id=identifier)
+                observed = json.loads(self.cli("job", "observe", identifier, "-", input=json.dumps(event)).stdout)
+                self.assertEqual(observed["job_id"], identifier)
+                report = json.loads(self.cli("scorecard", "--weekly", "2026-11-19", "--timezone", "UTC",
+                                             "--as-of", "2099-11-27T10:00:00Z", "--json").stdout)
+                self.assertIn(identifier, report["delivered"]["jobs"])
+                self.assertEqual(report["invalid_job_directories"], 0)
+                self.assertFalse(report["diagnostics"])
+                self.assertEqual(report["unwindowed"]["observations"]["owner_effort"], count)
+                legacy = json.loads(self.cli("scorecard", "--json").stdout)
+                self.assertEqual(legacy["v1.2-two-phase"]["jobs"], count)
+                self.assertEqual((folder / "job.json").read_bytes(), original)
+
+    def test_observe_refuses_job_ids_longer_than_a_safe_filename(self):
+        identifier = F.make_job_id(1, "a" * 252)
+        result = self.cli("job", "observe", identifier, "-", input="{}", success=False)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("REFUSED: invalid job ID", result.stdout)
+        self.assertNotIn("Traceback", result.stdout + result.stderr)
+
+    def test_non_job_observation_identifiers_keep_their_existing_length_limit(self):
+        self.write_job()
+        event = self.effort(source={"kind": "owner", "record_id": "r" * 129})
+        result = self.cli("job", "observe", JOB_ID, "-", input=json.dumps(event), success=False)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("source.record_id", result.stdout)
+        self.assertFalse((self.job_dir / "observations").exists())
+
     def test_legacy_record_rejects_invalid_values_without_mutating_state(self):
         cases = [("escaped", "treu"), ("owner_changes", "FALSE"), ("owner_minutes", "unknown"),
                  ("owner_minutes", "nan"), ("owner_minutes", "-1"), ("cost_usd", "inf"),
