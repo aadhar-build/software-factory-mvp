@@ -380,14 +380,15 @@ class TestScorecard(unittest.TestCase):
         m = F.job_metrics(self.job("001-a", self.ESCALATED))
         self.assertEqual(m["agent_minutes"], 10.0)
         self.assertEqual(m["lead_hours"], 10.17)
-        self.assertTrue(m["first_pass_gate"])
+        self.assertIsNone(m["first_pass_gate"])
+        self.assertTrue(m["first_gate_attempted"])
         self.assertTrue(m["escalated"])
         self.assertFalse(m["auto_merged"])
         self.assertTrue(m["merged"])
 
     def test_failed_gate_and_auto_merge(self):
         m = F.job_metrics(self.job("002-b", self.AUTO, rnd=2))
-        self.assertFalse(m["first_pass_gate"])
+        self.assertIsNone(m["first_pass_gate"])
         self.assertTrue(m["auto_merged"])
         self.assertEqual(m["agent_minutes"], 20.0)
         self.assertEqual(m["rounds"], 2)
@@ -401,8 +402,10 @@ class TestScorecard(unittest.TestCase):
         self.assertEqual(set(cards), {"v1", "v1.1-skills"})
         new = cards["v1.1-skills"]
         self.assertEqual((new["jobs"], new["merged"]), (2, 1))
-        self.assertEqual(new["first_pass_gate"], (0, 1))
-        self.assertEqual(new["change_fail"], (1, 1))
+        self.assertIsNone(new["first_pass_gate"])
+        self.assertEqual(new["coverage"]["first_pass_gate"]["unknown"], 1)
+        self.assertIsNone(new["change_fail"])
+        self.assertEqual(new["coverage"]["change_fail"]["legacy_affected"], 1)
         self.assertEqual(new["owner_minutes_median"], 4)
         self.assertEqual(cards["v1"]["escalated"], (1, 1))
 
@@ -410,7 +413,7 @@ class TestScorecard(unittest.TestCase):
         jobs = [self.job("002-b", self.AUTO, rnd=2, factory_version="v1.1-skills")]
         baseline = {"version": "v1", "jobs": 4, "merged": 4, "first_pass_gate": [4, 4]}
         text = F.render_scorecard(F.scorecard(jobs), baseline)
-        self.assertIn("| First-pass gate | 4 of 4 (100%) | 0 of 1 (0%) |", text)
+        self.assertIn("| First-pass gate | 4 of 4 (100%) | not measured (0/1 observed, 1 unknown) |", text)
         self.assertIn("directional", text)
 
 

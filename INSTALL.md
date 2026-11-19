@@ -17,7 +17,11 @@ THIRD_PARTY_NOTICES.md
 docs/agents/*.md
 .claude/settings.json
 factory/bin/job  factory/bin/gate  factory/bin/route
-factory/lib/factory.py
+factory/bin/scorecard  factory/bin/adversarial-report
+factory/lib/factory.py  factory/lib/observations.py  factory/lib/guardrails.py
+factory/lib/evidence_adapter.py  factory/lib/factory_recovery.py  factory/lib/merge_evidence.py
+factory/lib/decision_card.py  factory/lib/scorecard_report.py
+factory/baseline-v1.json
 factory/config.json
 factory/checks.sh
 ```
@@ -39,4 +43,15 @@ factory/checks.sh
 
 - `bash factory/checks.sh` passes on the base branch. With Python 3.12+, `unittest` exits non-zero when it finds no tests, so a new repo needs at least one smoke test before the first job.
 - `factory/bin/job list` prints `no jobs`.
+- Run `factory/bin/scorecard --json` and `factory/bin/scorecard --weekly YYYY-MM-DD --timezone IANA --json`. The former prints `{}` in an empty install and the latter reports zero delivered jobs for a defined empty week. Compare the copied baseline bytes to the source and retain its four-job historical cohort.
+- In a disposable checkout, add one observation with `factory/bin/job observe <id> <file|->`, replay it with the same ID, and submit a correction using a new ID and `supersedes_event_id`. Confirm that `factory/bin/job card <id>` and `factory/bin/job recovery <id>` read the updated evidence and the job state is byte-identical.
+- Confirm the reporting executables have their execute bits. Run `factory/bin/adversarial-report --candidate <full-commit-sha> --json` against the trusted local candidate. Keep the report with its candidate hash and observed, missed, or missing case results.
 - Report what was copied, what was adapted, and the allowlist for the owner to confirm.
+
+## Observation and reporting data
+
+`job observe` accepts one UTF-8 v1 JSON object. Allocate its `event_id` before running the command and reuse the same ID on retry. The command prints the stored observation, including its recording time. Use identifiers and references to sanitized evidence. The ledger lives under `factory/jobs/<id>/observations/` alongside the existing job data. Preserve it when updating or rolling back the controller.
+
+Weekly reporting is on demand. Supply the team's IANA time zone to set the seven-day cohort and `--defect-window-days N` to specify the escaped-defect window. `--as-of` accepts a UTC timestamp and applies the recording-time cutoff to ledger observations. Legacy job fields without recording timestamps remain separately identified in the report. Canonical gate and review Markdown are historical evidence. A stabilized installation can verify bound receipts and worker audits locally when their candidate, base, spec, round, and publication state can all be established.
+
+If an existing repository webhook has a closed, merged pull-request delivery, record a `check_evidence` observation with `source.kind` set to `controller`, `data.check_id` set to `merged_candidate`, `data.verdict` set to `pass`, and the candidate SHA and round. In `evidence` point to the same repository's `https://api.github.com/repos/OWNER/REPO/hooks/HOOK_ID/deliveries/DELIVERY_ID` record. The weekly `--verify-github-merges` option performs the read through the authenticated GitHub CLI using existing Webhooks read access. An expired, inaccessible, or mismatched delivery leaves the exact merged candidate unknown. The report records only the verified merge identifiers and timestamp. [GitHub webhook delivery endpoint](https://docs.github.com/en/rest/repos/webhooks#get-a-delivery-for-a-repository-webhook)
