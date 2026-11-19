@@ -24,7 +24,7 @@ _DIRECTORY = "observations"
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")
-_JOB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_JOB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,254}")
 _PATH_COMPONENT = re.compile(r"[A-Za-z0-9._-]{1,128}")
 _UTC_TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|\+00:00)")
 _HTTPS = re.compile(r"https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?(?:[/%#A-Za-z0-9_.~:+@&=,-]*)")
@@ -51,6 +51,10 @@ def _pattern(value, label: str, regex: re.Pattern) -> str:
 
 def _identifier(value, label: str) -> str:
     return _pattern(value, label, _IDENTIFIER)
+
+
+def _job_identifier(value, label: str) -> str:
+    return _pattern(value, label, _JOB_ID)
 
 
 def _uuid(value, label: str) -> str:
@@ -315,7 +319,7 @@ def _normalize(event, job_id: str, *, stored: bool) -> dict:
         raise ObservationError("unsupported schema version")
     fields = {
         "schema_version": _positive_integer, "event_id": _uuid, "kind": frozenset(_DATA_FIELDS),
-        "job_id": _identifier, "occurred_at": _timestamp, "recorded_at": _timestamp,
+        "job_id": _job_identifier, "occurred_at": _timestamp, "recorded_at": _timestamp,
         "origin": frozenset({"real", "controlled"}), "source": _source, **_BINDING,
         "evidence": _evidence, "supersedes_event_id": _uuid, "data": lambda value, label: value,
     }
@@ -351,7 +355,7 @@ def _open_directory(path: Path | str, parent_fd: int | None = None):
 @contextmanager
 def _open_job(job_dir: Path):
     path = job_dir.absolute()
-    _pattern(path.name, "job directory name", _JOB_ID)
+    _job_identifier(path.name, "job directory name")
     if ".." in path.parts:
         raise ObservationError("invalid job directory path")
     # Anchor by descriptor across the job directory and its containing factory
