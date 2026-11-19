@@ -1,5 +1,7 @@
 {
-  "version": "v1.2-two-phase",
+  "version": "v1.3-phase-gate",
+  "phase_gate": true,
+  "rules_file": "docs/agents/standing-rules.md",
   "baseline": "factory/baseline-v1.json",
   "owner_name": "the repo owner",
   "lanes": {"clarify": 3, "build": 1},
@@ -15,6 +17,7 @@
     "ready_for_agent": "ready-for-agent"
   },
   "models": {
+    "phase-planner": "opus",
     "intake": "opus",
     "spec-writer": "opus",
     "builder": "opus",

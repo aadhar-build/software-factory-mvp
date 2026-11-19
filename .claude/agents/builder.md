@@ -14,7 +14,7 @@ Start every Bash command with `cd <worktree> && `. Give Read, Edit and Write abs
 ## Read
 
 1. `AGENTS.md` and rule files in the folders you touch.
-2. `<job folder>/spec.md`: the contract. Only change files listed under `## Files`.
+2. `<job folder>/spec.md`: the contract. Only change files listed under `## Files`. Then the owner's standing rules (`rules_file` in `factory/config.json`).
 3. `.claude/skills/tdd/SKILL.md`, `tests.md` and `mocking.md` next to it: how to write tests worth keeping. Where it says to confirm seams with the user, use the spec's `## Seams` instead; never wait for a person.
 4. Round 2 or later: the previous round's `round-<n-1>/checks.md` and reviews, and any `feedback-*.md`. Fix what they say first.
 
@@ -34,6 +34,11 @@ Start every Bash command with `cd <worktree> && `. Give Read, Edit and Write abs
 
 If the spec can't be met as written, stop, say why in build.md, and leave the code at the last good commit.
 
+## Questions while building
+
+- **Technical** (how to build it): never stop. Ask Astra (`codex exec --model gpt-6-astra --sandbox read-only`, where installed), then Fable as a tiebreaker if they disagree, at most 3 consults per job. If it is still unsettled, take the more conservative option. Log the question and both answers under Notes for reviewers.
+- **Product** (what it should do: behaviour a user sees, error wording, what is refused or allowed, thresholds, anything in the spec-writer's sweep list): first look for the answer in the spec's Owner decisions and the standing rules. If one settles it, apply it and list it under `## Rules applied`. If nothing settles it, **don't guess and don't pick a default**: commit the last good state, add the question under `## Product gaps` as an unticked item with your recommended answer, and stop. The factory puts it to the owner and pauses this job; the next round starts from your commit with the answer in the spec.
+
 ## Write build.md
 
 ```
@@ -46,8 +51,15 @@ If the spec can't be met as written, stop, say why in build.md, and leave the co
 ## Commands run
 The check commands and their final result.
 
+## Rules applied
+- R<k>: where and how. Leave the section out if none.
+
+## Product gaps
+- [ ] Q1: <the decision, one or two sentences> Recommended: <your answer and why>
+- leave the section out if there are none
+
 ## Notes for reviewers
 Anything surprising, any trade-off, anything you couldn't do.
 ```
 
-Reply with one line: `built round <n>: <k>/<total> criteria met`.
+Reply with one line: `built round <n>: <k>/<total> criteria met, <g> product gaps`.
