@@ -366,13 +366,27 @@ class WeeklyScorecard(unittest.TestCase):
         item["events"][-1]["round"] = 1
         self.assertIsNone(report(item)["acceptance"]["rate"]["percent"])
 
-    def test_unverified_historical_guardrail_path_is_linked(self):
+    def test_historical_guardrail_path_is_labeled_local(self):
         item = record()
         item["guardrails"] = dict(requirements=[dict(id="gate", required=True, status="unverified",
                                                     evidence=[], legacy_paths=["gate-r1.md"])])
         markdown = render_weekly_report(report(item))
-        self.assertIn("factory/jobs/one/gate-r1.md", markdown)
+        self.assertIn("Local historical evidence reference `factory/jobs/one/gate-r1.md`", markdown)
+        self.assertNotIn("](factory/jobs/", markdown)
         self.assertIn("unverified", markdown)
+
+    def test_only_tracker_links_and_safe_local_references_are_rendered(self):
+        item = record()
+        item["url"] = "https://github.com/example/factory/pull/2"
+        item["guardrails"] = dict(requirements=[dict(id="gate", required=True, status="unverified", evidence=[
+            {"url": "https://example.test/demo", "verified": True},
+            {"path": "../secret"},
+        ])])
+        markdown = render_weekly_report(report(item))
+        self.assertIn("[one](https://github.com/example/factory/pull/2)", markdown)
+        self.assertIn("Evidence link unavailable", markdown)
+        self.assertNotIn("https://example.test/demo", markdown)
+        self.assertNotIn("secret", markdown)
 
     def test_authenticated_merge_date_precedes_local_stage_update(self):
         item = record(history=[(1, "intake"), (4, "approve"), (4, "needs-human")])
@@ -419,7 +433,8 @@ class WeeklyScorecard(unittest.TestCase):
         self.assertEqual(result["escalations"]["missed"], 1)
         self.assertEqual(result["guardrails"]["covered_requirements"], 2)
         self.assertIn("review", render_weekly_report(result))
-        self.assertIn("factory/jobs/two/job.json", render_weekly_report(result))
+        self.assertIn("`two` (local job)", render_weekly_report(result))
+        self.assertNotIn("job.json", render_weekly_report(result))
 
 
 if __name__ == "__main__":

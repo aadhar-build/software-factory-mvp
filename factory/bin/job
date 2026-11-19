@@ -37,6 +37,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 import factory as F  # noqa: E402
+from factory_recovery import recovery_transition_output  # noqa: E402
 
 
 def _load(root: Path, job_id: str) -> tuple[Path, dict]:
@@ -284,7 +285,11 @@ def cmd_tally(root: Path, cfg: dict, args: list[str]) -> str:
     else:
         F.move(job, "approve", "all reviews passed")
     F.write_job(d, job)
-    return f"{job['id']} -> {job['stage']} ({', '.join(f'{n}:{v}' for n, v in verdicts.items())})"
+    if job["stage"] == "recovery":
+        verdicts = {name: verdict if verdict in {"PASS", "CHANGES"} else "UNVERIFIED"
+                    for name, verdict in verdicts.items()}
+    status = f"{job['id']} -> {job['stage']} ({', '.join(f'{n}:{v}' for n, v in verdicts.items())})"
+    return recovery_transition_output(status, d, job)
 
 
 def cmd_decide(root: Path, cfg: dict, args: list[str]) -> str:
@@ -441,25 +446,21 @@ def cmd_observe(root: Path, cfg: dict, args: list[str]) -> str:
 def cmd_card(root: Path, cfg: dict, args: list[str]) -> str:
     from decision_card import render_decision_card
     from evidence_adapter import reporting_record
-    from factory_recovery import recovery_summary
+    from factory_recovery import report_recovery_summary
 
     d = F.reporting_job_dir(root, args[0])
     record = reporting_record(root, cfg, d)
-    job, events = record["job"], record["events"]
-    return render_decision_card(job, events, record["guardrails"], recovery_summary(job, events)).rstrip("\n")
+    return render_decision_card(record["job"], record["events"], record["guardrails"],
+                                report_recovery_summary(record), verified_source_url=record["url"]).rstrip("\n")
 
 
 def cmd_recovery(root: Path, cfg: dict, args: list[str]) -> str:
-    from evidence_adapter import read_reporting_job
-    from factory_recovery import recovery_summary
-    from observations import load_events
+    from evidence_adapter import reporting_record
+    from factory_recovery import report_recovery_summary
 
     d = F.reporting_job_dir(root, args[0])
-    job = read_reporting_job(d)
-    events, diagnostics = load_events(d, include_ancestry=True)
-    if job.get("origin") != "controlled":
-        events = [event for event in events if event["origin"] == "real"]
-    return json.dumps({**recovery_summary(job, events), "diagnostics": diagnostics,
+    record = reporting_record(root, cfg, d)
+    return json.dumps({**report_recovery_summary(record), "diagnostics": record["diagnostics"],
                        "incident_and_interruption_source_verification": "unavailable"}, indent=2)
 
 
