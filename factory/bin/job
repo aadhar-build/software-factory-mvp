@@ -413,6 +413,7 @@ def cmd_record(root: Path, cfg: dict, args: list[str]) -> str:
 
 
 def cmd_observe(root: Path, cfg: dict, args: list[str]) -> str:
+    from evidence_adapter import read_reporting_job
     from observations import MAX_EVENT_BYTES, ObservationError, append_event, decode_event_json
 
     if len(args) != 2:
@@ -430,7 +431,9 @@ def cmd_observe(root: Path, cfg: dict, args: list[str]) -> str:
     except OSError as exc:
         raise F.FactoryError("cannot read observation input") from exc
     try:
-        return json.dumps(append_event(d, decode_event_json(raw)), indent=2)
+        event = decode_event_json(raw)
+        read_reporting_job(d)
+        return json.dumps(append_event(d, event), indent=2)
     except ObservationError as exc:
         raise F.FactoryError(str(exc)) from exc
 

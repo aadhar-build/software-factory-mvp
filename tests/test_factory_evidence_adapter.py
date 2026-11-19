@@ -16,6 +16,7 @@ class EvidenceAdapterIntegration(FactoryCLI, unittest.TestCase):
         path = self.job_dir.parent / name / "job.json"
         path.parent.mkdir()
         path.write_text(json.dumps({**json.loads(self.state.read_text()), "id": name, **changes}))
+        return path
 
     def test_reports_keep_healthy_jobs_when_job_state_shapes_are_invalid(self):
         self.write_job(stage="merged")
@@ -31,6 +32,44 @@ class EvidenceAdapterIntegration(FactoryCLI, unittest.TestCase):
         legacy = self.cli("scorecard", "--json")
         self.assertEqual(json.loads(legacy.stdout)["v1.2-two-phase"]["jobs"], 1)
         self.assertIn("002-malformed-transition", legacy.stderr)
+
+    def test_reports_refuse_invalid_legacy_amounts_and_booleans(self):
+        self.write_job(stage="merged", owner_minutes=0, cost_usd=0, escaped=False, owner_changes=None)
+        damaged = {
+            "002-negative-minutes": {"owner_minutes": -1},
+            "003-negative-cost": {"cost_usd": -0.25},
+            "004-nonfinite-cost": {"cost_usd": float("inf")},
+            "005-string-escape": {"escaped": "false"},
+            "006-numeric-owner-change": {"owner_changes": 0},
+            "007-nonfinite-revision": {"revision": float("nan")},
+        }
+        for name, changes in damaged.items():
+            self.broken_job(name, **changes)
+        weekly = json.loads(self.cli("scorecard", *self.WEEKLY, "--json").stdout)
+        self.assertEqual(weekly["delivered"]["jobs"], [JOB_ID])
+        self.assertEqual(set(weekly["diagnostics"]), set(damaged))
+        self.assertEqual(weekly["legacy"][JOB_ID], {"owner_minutes": 0, "cost_usd": 0, "escaped": False})
+        legacy = self.cli("scorecard", "--json")
+        card = json.loads(legacy.stdout)["v1.2-two-phase"]
+        self.assertEqual(card["jobs"], 1)
+        self.assertEqual((card["owner_minutes_median"], card["cost_usd_median"]), (0, 0))
+        for name in damaged:
+            self.assertIn(name, legacy.stderr)
+
+    def test_reports_reject_duplicate_fields_at_every_level(self):
+        self.write_job(stage="merged", owner_minutes=0)
+        top = self.broken_job("002-duplicate-amount")
+        nested = self.broken_job("003-duplicate-history")
+        top.write_text(top.read_text().replace('"owner_minutes": 0', '"owner_minutes": 12, "owner_minutes": 0'))
+        nested.write_text(nested.read_text().replace('"note": "created"', '"note": "duplicate", "note": "created"'))
+        before = {path: path.read_bytes() for path in (top, nested, self.state)}
+        weekly = json.loads(self.cli("scorecard", *self.WEEKLY, "--json").stdout)
+        self.assertEqual(weekly["delivered"]["jobs"], [JOB_ID])
+        self.assertEqual(set(weekly["diagnostics"]), {top.parent.name, nested.parent.name})
+        legacy = self.cli("scorecard", "--json")
+        self.assertEqual(json.loads(legacy.stdout)["v1.2-two-phase"]["jobs"], 1)
+        for path, original in before.items():
+            self.assertEqual(path.read_bytes(), original)
 
     def test_invalid_folder_names_are_counted_without_echoing_them(self):
         self.write_job(stage="merged")

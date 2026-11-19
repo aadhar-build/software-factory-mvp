@@ -84,6 +84,22 @@ class TestDecisionCard(unittest.TestCase):
         self.assertIn("old` — stale", card)
         self.assertIn(OLDER, card)
 
+    def test_legacy_metrics_link_uses_only_stable_https_record_urls(self):
+        job = {"id": "012", "artifact_root": "factory/jobs/012"}
+        record = "https://example.com/metrics/12"
+        for suffix in (
+            "?X-Amz-Signature=fixture-signature",
+            "#access_token=fixture-token",
+            "#access_token%3Dfixture-token",
+        ):
+            with self.subTest(suffix=suffix):
+                card = render_decision_card({**job, "metrics_url": record + suffix}, [], guardrails(), {})
+                self.assertIn("[Job metrics](factory/jobs/012/job.json)", card)
+                self.assertNotIn(suffix, card)
+
+        card = render_decision_card({**job, "metrics_url": record + "#elapsed-time"}, [], guardrails(), {})
+        self.assertIn(f"[Job metrics]({record}#elapsed-time)", card)
+
     def test_groups_current_and_stale_evidence_under_their_own_results(self):
         earlier_report = {"path": "round-1/checks.json", "sha256": "f" * 64}
         checked = requirement("test:unit", "pass", evidence=[earlier_report, REPORT])

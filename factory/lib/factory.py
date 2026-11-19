@@ -154,11 +154,15 @@ def validate_reporting_job(job, job_id: str) -> dict:
         value = job.get(field)
         if value is not None:
             try:
-                valid = type(value) in (int, float) and math.isfinite(value)
+                valid = type(value) in (int, float) and math.isfinite(value) and value >= 0
             except OverflowError:
                 valid = False
             if not valid:
                 raise FactoryError(f"job {job_id} has malformed {field}")
+    for field in ("escaped", "owner_changes"):
+        value = job.get(field)
+        if value is not None and type(value) is not bool:
+            raise FactoryError(f"job {job_id} has malformed {field}")
     normalized_history = [step if _ts(step.get("at")) is not None else {**step, "at": None} for step in history]
     return {**job, "history": normalized_history}
 
