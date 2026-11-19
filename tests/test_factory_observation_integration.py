@@ -95,6 +95,8 @@ class FactoryObservationIntegration(FactoryCLI, unittest.TestCase):
         before = self.state.read_bytes()
         marker = self.job_dir / ".gate-publication.pending"
         marker.write_bytes(b"round-1\n")
+        worker_marker = self.job_dir / "worker-round-1-builder.json.pending"
+        worker_marker.write_bytes(b"controlled worker journal\n")
         event = self.effort()
         first = json.loads(self.cli("job", "observe", JOB_ID, "-", input=json.dumps(event)).stdout)
         entry = self.root / "input.json"
@@ -104,6 +106,7 @@ class FactoryObservationIntegration(FactoryCLI, unittest.TestCase):
         self.assertTrue(first["recorded_at"].endswith("Z"))
         self.assertEqual(self.state.read_bytes(), before)
         self.assertEqual(marker.read_bytes(), b"round-1\n")
+        self.assertEqual(worker_marker.read_bytes(), b"controlled worker journal\n")
         self.assertEqual(len(list((self.job_dir / "observations").glob("*.json"))), 1)
 
     def test_observe_refuses_malformed_input_and_job_path_traversal(self):
@@ -123,6 +126,19 @@ class FactoryObservationIntegration(FactoryCLI, unittest.TestCase):
         result = self.cli("job", "observe", JOB_ID, "-", input=raw, success=False)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertFalse((self.job_dir / "observations").exists())
+
+    def test_observe_refuses_ambiguous_or_mismatched_stored_job_id(self):
+        for identity in ('"002-another-job"', f'"002-another-job", "id": "{JOB_ID}"'):
+            with self.subTest(identity=identity):
+                self.write_job()
+                raw_state = self.state.read_text().replace(f'"id": "{JOB_ID}"', f'"id": {identity}', 1)
+                self.state.write_text(raw_state)
+                before = self.state.read_bytes()
+                result = self.cli("job", "observe", JOB_ID, "-", input=json.dumps(self.effort()), success=False)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("REFUSED:", result.stdout + result.stderr)
+                self.assertEqual(self.state.read_bytes(), before)
+                self.assertFalse((self.job_dir / "observations").exists())
 
     def test_card_reads_trusted_requirements_without_running_checks(self):
         self.write_job()

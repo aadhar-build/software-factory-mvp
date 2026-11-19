@@ -94,7 +94,9 @@ def weekly(root: Path, cfg: dict, args: argparse.Namespace) -> None:
 
 
 def legacy(root: Path, cfg: dict, as_json: bool) -> None:
-    jobs, unreadable, invalid_ids = read_jobs(root, lambda folder: F.validate_reporting_job(F.read_job(folder), folder.name))
+    from evidence_adapter import read_reporting_job
+
+    jobs, unreadable, invalid_ids = read_jobs(root, read_reporting_job)
     cards = F.scorecard(jobs)
     if as_json:
         print(json.dumps(cards, indent=2, default=str))

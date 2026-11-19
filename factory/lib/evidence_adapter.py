@@ -32,10 +32,22 @@ _GITHUB_REMOTE = re.compile(
 )
 
 
+def _unique_fields(pairs):
+    fields = dict(pairs)
+    if len(fields) != len(pairs):
+        raise ValueError("ambiguous job state")
+    return fields
+
+
+def _reject_constant(value):
+    raise ValueError("nonfinite job state")
+
+
 def _job_state(folder: Path) -> tuple[dict, bytes]:
     state = read_job_artifact(folder, "job.json")
     try:
-        job = json.loads(state) if state is not None else None
+        job = (json.loads(state, object_pairs_hook=_unique_fields, parse_constant=_reject_constant)
+               if state is not None else None)
     except (ValueError, RecursionError):
         job = None
     return F.validate_reporting_job(job, folder.name), state

@@ -6,6 +6,8 @@ from datetime import datetime
 from functools import partial
 from urllib.parse import quote, urlsplit
 
+from observations import ObservationError, _url
+
 
 _STATUSES = {"pass", "fail", "pending", "missing", "stale", "unverified", "not_required"}
 _OBJECT_ID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z", re.IGNORECASE)
@@ -22,17 +24,10 @@ def _code(value):
 
 
 def _https_url(value):
-    if not isinstance(value, str) or not value.startswith("https://") or any(
-        char.isspace() or ord(char) < 32 or char == "\\" for char in value
-    ):
-        return None
     try:
-        parsed = urlsplit(value)
-        if not parsed.hostname or parsed.username is not None:
-            return None
-    except ValueError:
+        return _url(value, "decision card link")
+    except ObservationError:
         return None
-    return quote(value, safe=":/?#[]@!$&'*+,;=%")
 
 
 def _safe_path(path):
