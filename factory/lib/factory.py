@@ -8,12 +8,17 @@ allowlist). Standard library only, so it runs anywhere Python 3.10+ does.
 from __future__ import annotations
 
 import datetime as _dt
+import fcntl
 import fnmatch
 import json
 import math
 import os
 import re
+import stat
 import subprocess
+import tempfile
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 # --------------------------------------------------------------------------
@@ -52,6 +57,10 @@ class FactoryError(Exception):
     """A refused action. The message is shown to the orchestrator as is."""
 
 
+class FactoryBusy(FactoryError):
+    """A concurrent command holds a required lock."""
+
+
 # --------------------------------------------------------------------------
 # Paths and config
 # --------------------------------------------------------------------------
@@ -81,7 +90,11 @@ def jobs_dir(root: Path) -> Path:
 
 
 def job_dir(root: Path, job_id: str) -> Path:
+    if not valid_reporting_job_id(job_id):
+        raise FactoryError(f"invalid job ID {job_id!r}")
     d = jobs_dir(root) / job_id
+    if any(path.is_symlink() for path in (d.parent.parent, d.parent, d)):
+        raise FactoryError("job directory must be a real directory")
     if not (d / "job.json").exists():
         raise FactoryError(f"no job {job_id}")
     return d
@@ -122,8 +135,93 @@ def now() -> str:
 # --------------------------------------------------------------------------
 
 
+GATE_PENDING = ".gate-publication.pending"
+_held_mutex = ContextVar("factory_job_mutex", default=None)
+
+
+@contextmanager
+def _directory_lock(d: Path, busy: str):
+    # Lock the directory inode itself so a replaced lock file cannot split ownership.
+    try:
+        fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise FactoryError(f"cannot open directory {d.name}") from exc
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise FactoryBusy(busy) from exc
+        yield fd
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def job_mutex(d: Path):
+    owner = (os.getpid(), d)
+    if _held_mutex.get() == owner:
+        yield
+        return
+    if any(path.is_symlink() for path in (d.parent.parent, d.parent, d)):
+        raise FactoryError("job directory must be a real directory")
+    with _directory_lock(d, f"job {d.name} is busy; retry"):
+        token = _held_mutex.set(owner)
+        try:
+            yield
+        finally:
+            _held_mutex.reset(token)
+
+
+def gate_worktree_lock(wt: Path):
+    return _directory_lock(wt, "another gate is running on this worktree; retry after it exits")
+
+
+def require_admission(d: Path) -> None:
+    if os.path.lexists(d / GATE_PENDING):
+        raise FactoryError("gate publication interrupted; reconcile the receipt and job before retrying")
+
+
+def _sync_directory(folder: Path) -> None:
+    fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def atomic_write(path: Path, content: bytes) -> None:
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".factory-tmp-", delete=False) as stream:
+        tmp = Path(stream.name)
+        try:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+            os.replace(tmp, path)
+            _sync_directory(path.parent)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+
+def remove_marker(path: Path) -> None:
+    path.unlink()
+    _sync_directory(path.parent)
+
+
 def read_job(d: Path) -> dict:
-    return json.loads((d / "job.json").read_text())
+    try:
+        fd = os.open(d / "job.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise FactoryError("job.json must be a regular file")
+            job = json.load(stream)
+        if not isinstance(job, dict):
+            raise FactoryError("job.json must contain an object")
+        revision = job.get("revision", 0)
+        if type(revision) is not int or revision < 0:
+            raise FactoryError("invalid job revision")
+        return job
+    except (OSError, ValueError) as exc:
+        raise FactoryError("invalid or unreadable job.json") from exc
 
 
 def validate_reporting_job(job, job_id: str) -> dict:
@@ -168,10 +266,19 @@ def validate_reporting_job(job, job_id: str) -> dict:
     return {**job, "history": normalized_history}
 
 
-def write_job(d: Path, job: dict) -> None:
-    tmp = d / "job.json.tmp"
-    tmp.write_text(json.dumps(job, indent=2) + "\n")
-    tmp.replace(d / "job.json")
+def write_job(d: Path, job: dict, *, publishing_gate: bool = False) -> None:
+    # The gate alone writes state with a pending marker, while holding the
+    # mutex continuously from admission through marker removal.
+    if publishing_gate and _held_mutex.get() != (os.getpid(), d):
+        raise FactoryError("gate publication requires the job mutex")
+    with job_mutex(d):
+        if not publishing_gate:
+            require_admission(d)
+        path = d / "job.json"
+        revision = read_job(d).get("revision", 0) if os.path.lexists(path) else 0
+        updated = {**job, "revision": revision + 1}
+        atomic_write(path, (json.dumps(updated, indent=2) + "\n").encode())
+        job["revision"] = updated["revision"]
 
 
 def new_job(job_id: str, issue: int, title: str) -> dict:

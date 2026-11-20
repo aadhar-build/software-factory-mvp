@@ -443,8 +443,8 @@ def sh(cmd, cwd):
     return subprocess.run(cmd, cwd=cwd, check=True, capture_output=True, text=True, shell=True).stdout
 
 
-class TestGateEndToEnd(unittest.TestCase):
-    """A throwaway repo with a bare origin: the gate passes a clean change and fails bad ones."""
+class GateFixture:
+    """A throwaway checkout and a bare local origin for gate tests."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -484,6 +484,8 @@ class TestGateEndToEnd(unittest.TestCase):
         p.write_text(text)
         sh(f"git add -A && git {self.env} commit -qm change", wt)
 
+
+class TestGateEndToEnd(GateFixture, unittest.TestCase):
     def test_clean_change_passes(self):
         job_id, d, wt = self.make_job("- src/a.py")
         self.commit(wt, "src/a.py", "x = 2\n")

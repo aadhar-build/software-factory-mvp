@@ -30,8 +30,11 @@ from __future__ import annotations
 import json
 import math
 import os
+import runpy
 import stat
+import subprocess
 import sys
+from functools import wraps
 from pathlib import Path
 
 sys.dont_write_bytecode = True
@@ -43,6 +46,16 @@ from factory_recovery import recovery_transition_output  # noqa: E402
 def _load(root: Path, job_id: str) -> tuple[Path, dict]:
     d = F.job_dir(root, job_id)
     return d, F.read_job(d)
+
+
+def _admitted(fn):
+    @wraps(fn)
+    def run(root, cfg, args):
+        d = F.job_dir(root, args[0])
+        with F.job_mutex(d):
+            F.require_admission(d)
+            return fn(root, cfg, args)
+    return run
 
 
 def _label(cfg: dict, key: str) -> str:
@@ -118,6 +131,7 @@ def cmd_show(root: Path, cfg: dict, args: list[str]) -> str:
     return json.dumps(job, indent=2)
 
 
+@_admitted
 def cmd_advance(root: Path, cfg: dict, args: list[str]) -> str:
     d, job = _load(root, args[0])
     if args[1] == "build":
@@ -143,6 +157,7 @@ def _remove_label(root: Path, number: int, label: str) -> None:
     F.gh_api(root, "DELETE", f"issues/{number}/labels/{label}", check=False)
 
 
+@_admitted
 def cmd_intake(root: Path, cfg: dict, args: list[str]) -> str:
     d, job = _load(root, args[0])
     text = (d / "intake.md").read_text()
@@ -166,6 +181,7 @@ def cmd_intake(root: Path, cfg: dict, args: list[str]) -> str:
     return f"{job['id']} -> {job['stage']}"
 
 
+@_admitted
 def cmd_worktree(root: Path, cfg: dict, args: list[str]) -> str:
     """job worktree <id> [--on <upstream-id>]: stack on a job that isn't merged yet."""
     d, job = _load(root, args[0])
@@ -193,6 +209,7 @@ def _pr_state(root: Path, number: int) -> dict:
     return F.gh_api(root, "GET", f"pulls/{number}") or {}
 
 
+@_admitted
 def cmd_pr(root: Path, cfg: dict, args: list[str]) -> str:
     from job_links import capture_candidate
 
@@ -215,6 +232,7 @@ def cmd_pr(root: Path, cfg: dict, args: list[str]) -> str:
     return f"opened PR #{job['pr']}"
 
 
+@_admitted
 def cmd_clarify(root: Path, cfg: dict, args: list[str]) -> str:
     """Phase 1 exit. Open product questions: ask on the issue and wait. None: build."""
     d, job = _load(root, args[0])
@@ -244,6 +262,7 @@ def cmd_clarify(root: Path, cfg: dict, args: list[str]) -> str:
     return f"{job['id']} -> ready (waiting for the build lane)"
 
 
+@_admitted
 def cmd_pickup(root: Path, cfg: dict, args: list[str]) -> str:
     """Build lane entry. If the base moved since the spec was written, send it back to spec."""
     d, job = _load(root, args[0])
@@ -260,6 +279,7 @@ def cmd_pickup(root: Path, cfg: dict, args: list[str]) -> str:
     return f"{job['id']} -> build (round {job['round']})"
 
 
+@_admitted
 def cmd_answers(root: Path, cfg: dict, args: list[str]) -> str:
     """Resume a needs-input job once the owner has answered and removed the label."""
     d, job = _load(root, args[0])
@@ -276,6 +296,7 @@ def cmd_answers(root: Path, cfg: dict, args: list[str]) -> str:
     return f"{job['id']} -> spec (issue.md refreshed with the owner's answers)"
 
 
+@_admitted
 def cmd_tally(root: Path, cfg: dict, args: list[str]) -> str:
     d, job = _load(root, args[0])
     rd = d / f"round-{job['round']}"
@@ -298,6 +319,7 @@ def cmd_tally(root: Path, cfg: dict, args: list[str]) -> str:
     return recovery_transition_output(status, d, job)
 
 
+@_admitted
 def cmd_decide(root: Path, cfg: dict, args: list[str]) -> str:
     d, job = _load(root, args[0])
     text = (d / "decision.md").read_text()
@@ -321,51 +343,59 @@ def _escalate(root: Path, cfg: dict, job: dict, reason: str) -> None:
     _add_label(root, job["issue"], _label(cfg, "needs_human"))
 
 
+@_admitted
 def cmd_merge(root: Path, cfg: dict, args: list[str]) -> str:
     d, job = _load(root, args[0])
     if job["stage"] != "merging":
         raise F.FactoryError(f"job is in {job['stage']}, not merging")
     wt = root / job["worktree"]
-    base = cfg["base_branch"]
-    if job.get("stacked_on_pr"):
-        up = _pr_state(root, job["stacked_on_pr"])
-        if not up.get("merged"):
-            _escalate(root, cfg, job, f"Approved, but it is stacked on #{job['stacked_on_pr']}, which isn't merged yet. Merge that first, then this one.")
-            F.move(job, "needs-human", f"waiting for stacked PR #{job['stacked_on_pr']}")
+    # Keep the worktree locked across sync, the final gate and the merge decision.
+    with F.gate_worktree_lock(wt) as gate_fd:
+        base = cfg["base_branch"]
+        if job.get("stacked_on_pr"):
+            up = _pr_state(root, job["stacked_on_pr"])
+            if not up.get("merged"):
+                _escalate(root, cfg, job, f"Approved, but it is stacked on #{job['stacked_on_pr']}, which isn't merged yet. Merge that first, then this one.")
+                F.move(job, "needs-human", f"waiting for stacked PR #{job['stacked_on_pr']}")
+                F.write_job(d, job)
+                return f"{job['id']} -> needs-human (stacked on unmerged #{job['stacked_on_pr']})"
+            job.pop("stacked_on_branch", None)
+            if (_pr_state(root, job["pr"]).get("base") or {}).get("ref") != base:
+                F.gh_api(root, "PATCH", f"pulls/{job['pr']}", {"base": base}, check=False)
+        F.fetch_base(wt, base)
+        merged = F.run(["git", "merge", "--no-edit", f"origin/{base}"], cwd=wt, check=False)
+        if "CONFLICT" in merged:
+            F.run(["git", "merge", "--abort"], cwd=wt, check=False)
+            _escalate(root, cfg, job, f"The branch conflicts with `{base}`. The factory doesn't resolve conflicts; please resolve or tell it what to keep.")
+            F.move(job, "needs-human", "merge conflict with base")
             F.write_job(d, job)
-            return f"{job['id']} -> needs-human (stacked on unmerged #{job['stacked_on_pr']})"
-        job.pop("stacked_on_branch", None)
-        if (_pr_state(root, job["pr"]).get("base") or {}).get("ref") != base:
-            F.gh_api(root, "PATCH", f"pulls/{job['pr']}", {"base": base}, check=False)
-    F.fetch_base(wt, base)
-    merged = F.run(["git", "merge", "--no-edit", f"origin/{base}"], cwd=wt, check=False)
-    if "CONFLICT" in merged:
-        F.run(["git", "merge", "--abort"], cwd=wt, check=False)
-        _escalate(root, cfg, job, f"The branch conflicts with `{base}`. The factory doesn't resolve conflicts; please resolve or tell it what to keep.")
-        F.move(job, "needs-human", "merge conflict with base")
+            return f"{job['id']} -> needs-human (conflict)"
+        F.run(["git", "push", "--quiet", "origin", job["branch"]], cwd=wt)
+        gate = Path(__file__).resolve().parent / "gate"
+        # Use the same Python gate without releasing either lock.
+        try:
+            final, _ = runpy.run_path(str(gate))["run_gate"](root, cfg, d, final=True, gate_fd=gate_fd)
+        except (F.FactoryError, OSError, subprocess.TimeoutExpired):
+            final = "FAIL"
+        if final != "PASS":
+            job = F.read_job(d)
+            F.move(job, "build", "final gate after syncing with base failed")
+            F.write_job(d, job)
+            return f"{job['id']} -> build (final gate failed)"
+        changed = F.changed_files(wt, base, job)
+        ok, why = F.automerge_ok(changed, cfg["automerge_allowlist"], job["risk"], job["surfaces"])
+        if not ok:
+            _escalate(root, cfg, job, f"Approved by the factory's approver, but it can't merge without you: {why}. Merge the PR to approve it.")
+            F.move(job, "needs-human", f"auto-merge refused: {why}")
+            F.write_job(d, job)
+            return f"{job['id']} -> needs-human ({why})"
+        F.gh_api(root, "PUT", f"pulls/{job['pr']}/merge", {"merge_method": cfg["merge_method"]})
+        F.move(job, "merged", why)
         F.write_job(d, job)
-        return f"{job['id']} -> needs-human (conflict)"
-    F.run(["git", "push", "--quiet", "origin", job["branch"]], cwd=wt)
-    gate = Path(__file__).resolve().parent / "gate"
-    final = F.run([sys.executable, str(gate), job["id"], "--final"], cwd=root, check=False).strip()
-    if not final.endswith("PASS"):
-        job = F.read_job(d)
-        F.move(job, "build", "final gate after syncing with base failed")
-        F.write_job(d, job)
-        return f"{job['id']} -> build (final gate failed)"
-    changed = F.changed_files(wt, base, job)
-    ok, why = F.automerge_ok(changed, cfg["automerge_allowlist"], job["risk"], job["surfaces"])
-    if not ok:
-        _escalate(root, cfg, job, f"Approved by the factory's approver, but it can't merge without you: {why}. Merge the PR to approve it.")
-        F.move(job, "needs-human", f"auto-merge refused: {why}")
-        F.write_job(d, job)
-        return f"{job['id']} -> needs-human ({why})"
-    F.gh_api(root, "PUT", f"pulls/{job['pr']}/merge", {"merge_method": cfg["merge_method"]})
-    F.move(job, "merged", why)
-    F.write_job(d, job)
-    return f"{job['id']} -> merged (PR #{job['pr']})"
+        return f"{job['id']} -> merged (PR #{job['pr']})"
 
 
+@_admitted
 def cmd_reject(root: Path, cfg: dict, args: list[str]) -> str:
     d, job = _load(root, args[0])
     reason = sys.stdin.read().strip() or "No reason given."
@@ -414,6 +444,7 @@ RECORDABLE = {"owner_minutes": _record_number, "cost_usd": _record_number,
               "escaped": _record_bool, "owner_changes": _record_bool}
 
 
+@_admitted
 def cmd_record(root: Path, cfg: dict, args: list[str]) -> str:
     d, job = _load(root, args[0])
     if len(args) < 3 or args[1] not in RECORDABLE:
