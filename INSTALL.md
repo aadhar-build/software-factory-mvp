@@ -21,7 +21,7 @@ factory/bin/scorecard  factory/bin/adversarial-report  factory/bin/evidence-bund
 factory/lib/factory.py  factory/lib/observations.py  factory/lib/guardrails.py
 factory/lib/evidence_adapter.py  factory/lib/factory_recovery.py  factory/lib/merge_evidence.py
 factory/lib/decision_card.py  factory/lib/scorecard_report.py  factory/lib/job_links.py
-factory/lib/evidence_bundle.py
+factory/lib/evidence_bundle.py  factory/lib/weekly_evidence.py  factory/lib/scorecard_source.py
 factory/baseline-v1.json
 factory/config.json
 factory/checks.sh
