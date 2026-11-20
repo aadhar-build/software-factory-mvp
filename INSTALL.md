@@ -22,6 +22,7 @@ factory/lib/factory.py  factory/lib/observations.py  factory/lib/guardrails.py
 factory/lib/evidence_adapter.py  factory/lib/factory_recovery.py  factory/lib/merge_evidence.py
 factory/lib/decision_card.py  factory/lib/scorecard_report.py  factory/lib/job_links.py
 factory/lib/evidence_bundle.py  factory/lib/weekly_evidence.py  factory/lib/scorecard_source.py
+factory/lib/owner_decision_view.py
 factory/baseline-v1.json
 factory/config.json
 factory/checks.sh
@@ -48,6 +49,7 @@ factory/checks.sh
 - In a disposable checkout, exercise the [observation and correction example](docs/agents/factory-owner-workflow.md#submit-and-correct-an-observation) with fixture values. Replay it with the same ID and check that the recording time is preserved. Submit the correction, then confirm that the job card reads the corrected effort, the recovery summary still reads the job, and the job state is byte-identical.
 - Confirm the reporting executables have their execute bits. Run `factory/bin/adversarial-report --candidate <full-commit-sha> --json` against the trusted local candidate. Keep the report with its candidate hash and observed, missed, or missing case results.
 - Run `factory/bin/evidence-bundle --help` to confirm the offline exporter and its imports are available. Use the [owner workflow](docs/agents/factory-owner-workflow.md#open-selected-job-evidence-offline) to export a synthetic job to a new directory and verify that `index.html` links to its manifest and selected receipt projections.
+- Exercise `--private-owner-view` with a disposable, synthetic job marked with the normal job origin. Verify that criterion labels appear in the private HTML, selected links open the correct projected receipts, and the command refuses a destination inside a checkout linked to the factory.
 - Report what was copied, what was adapted, and the allowlist for the owner to confirm.
 
 ## Observation and reporting data
