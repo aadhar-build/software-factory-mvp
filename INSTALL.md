@@ -17,10 +17,11 @@ THIRD_PARTY_NOTICES.md
 docs/agents/*.md
 .claude/settings.json
 factory/bin/job  factory/bin/gate  factory/bin/route
-factory/bin/scorecard  factory/bin/adversarial-report
+factory/bin/scorecard  factory/bin/adversarial-report  factory/bin/evidence-bundle
 factory/lib/factory.py  factory/lib/observations.py  factory/lib/guardrails.py
 factory/lib/evidence_adapter.py  factory/lib/factory_recovery.py  factory/lib/merge_evidence.py
 factory/lib/decision_card.py  factory/lib/scorecard_report.py  factory/lib/job_links.py
+factory/lib/evidence_bundle.py
 factory/baseline-v1.json
 factory/config.json
 factory/checks.sh
@@ -46,6 +47,7 @@ factory/checks.sh
 - Run `factory/bin/scorecard --json` in the empty install. It prints `{}`. In a disposable checkout, run `factory/bin/scorecard --weekly 2026-11-16 --timezone UTC --defect-window-days 14 --json` with those fixture settings and confirm zero delivered jobs. Compare the copied baseline bytes to the source and retain its four-job historical cohort.
 - In a disposable checkout, exercise the [observation and correction example](docs/agents/factory-owner-workflow.md#submit-and-correct-an-observation) with fixture values. Replay it with the same ID and check that the recording time is preserved. Submit the correction, then confirm that the job card reads the corrected effort, the recovery summary still reads the job, and the job state is byte-identical.
 - Confirm the reporting executables have their execute bits. Run `factory/bin/adversarial-report --candidate <full-commit-sha> --json` against the trusted local candidate. Keep the report with its candidate hash and observed, missed, or missing case results.
+- Run `factory/bin/evidence-bundle --help` to confirm the offline exporter and its imports are available. Use the [owner workflow](docs/agents/factory-owner-workflow.md#open-selected-job-evidence-offline) to export a synthetic job to a new directory and verify that `index.html` links to its manifest and selected receipt projections.
 - Report what was copied, what was adapted, and the allowlist for the owner to confirm.
 
 ## Observation and reporting data
