@@ -1,4 +1,5 @@
 factory/jobs/
+factory/phases/
 .worktrees/
 .env
 __pycache__/

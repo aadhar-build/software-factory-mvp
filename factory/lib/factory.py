@@ -31,7 +31,7 @@ TRANSITIONS: dict[str, set[str]] = {
     "spec": {"ready", "needs-input", "needs-human"},
     "ready": {"build", "spec", "rejected"},
     "needs-input": {"spec", "rejected"},
-    "build": {"gate", "needs-human"},
+    "build": {"gate", "needs-human", "needs-input"},
     "gate": {"review", "build", "recovery"},
     "review": {"approve", "build", "recovery"},
     "recovery": {"spec", "build", "needs-human", "rejected"},
@@ -87,6 +87,11 @@ def load_config(root: Path) -> dict:
 
 def jobs_dir(root: Path) -> Path:
     return root / "factory" / "jobs"
+
+
+def phases_dir(root: Path) -> Path:
+    """Per-phase files the orchestrator keeps (coverage.md). Not committed, like jobs/."""
+    return root / "factory" / "phases"
 
 
 def job_dir(root: Path, job_id: str) -> Path:
@@ -352,6 +357,53 @@ def open_product_questions(spec_text: str) -> list[str]:
     return found
 
 
+def open_product_gaps(build_text: str) -> list[str]:
+    """Unticked "- [ ]" items under build.md's "## Product gaps": product decisions the
+    builder met mid-build that neither the spec nor the standing rules settle."""
+    return [m.group(1) for line in _sections(build_text).get("product gaps", [])
+            if (m := _OPEN_ITEM_RE.match(line))]
+
+
+def question_ids(issue: int, questions: list[str]) -> list[str]:
+    """Stable, unambiguous ids for one ask, e.g. "71-Q1", so an answer by id can't land
+    on the wrong list. A leading "Q<n>:" the spec already gave is replaced by the id."""
+    out = []
+    for k, q in enumerate(questions, 1):
+        text = re.sub(r"^\*{0,2}Q\d+(?:[:.]\*{0,2}|\*{0,2}[:.])\s*", "", q.strip())
+        out.append(f"{issue}-Q{k}: {text}")
+    return out
+
+
+def after_gate(job: dict) -> bool:
+    """True once a job has passed the clarify exit at least once (reached ready).
+    A question asked after that is a phase 1 miss: the owner is interrupted mid-build."""
+    return any(e["stage"] == "ready" for e in job.get("history", []))
+
+
+def record_ask(job: dict, count: int, source: str) -> dict:
+    """Log one round of questions to the owner, for the scorecard."""
+    job.setdefault("asks", []).append(
+        {"at": now(), "count": count, "source": source, "after_gate": after_gate(job)})
+    return job
+
+
+def phase_blockers(jobs: list[dict], phase: str) -> list[str]:
+    """Jobs in the same phase still in their first clarify. While any is, nobody in the
+    phase may start building: all of a phase's questions come before any of its builds.
+    A job back in clarify after the gate (a spec refresh, or a gap found while building)
+    doesn't hold the others: it stops only itself."""
+    return [j["id"] for j in jobs
+            if j.get("phase") == phase and lane(j["stage"]) == "clarify" and not after_gate(j)]
+
+
+_MISSING_RE = re.compile(r"^\s*[-*]?\s*MISSING:\s*(.+?)\s*$")
+
+
+def coverage_missing(coverage_text: str) -> list[str]:
+    """Lines "MISSING: <area>" in a phase's coverage.md: source with no issue in the phase."""
+    return [m.group(1) for line in coverage_text.splitlines() if (m := _MISSING_RE.match(line))]
+
+
 def enter_build(job: dict, d: Path, note: str = "") -> dict:
     """Move a job into build by hand (`job advance <id> build`), always into a fresh round.
 
@@ -505,7 +557,21 @@ def job_metrics(job: dict) -> dict:
         "owner_changes": job.get("owner_changes") if type(job.get("owner_changes")) is bool else None,
         "owner_minutes": job.get("owner_minutes"),
         "cost_usd": job.get("cost_usd"),
+        # v1.3: asks are logged from v1.3 on, so older jobs report None, not zero.
+        "questions": sum(a["count"] for a in job["asks"]) if "asks" in job else None,
+        "asked_after_gate": any(a["after_gate"] for a in job["asks"]) if "asks" in job else None,
+        "owner_wait_hours": _waiting_hours(h),
     }
+
+
+def _waiting_hours(history: list[dict]) -> float:
+    """Hours the job sat waiting on a person for an answer (needs-input, needs-info),
+    counting only waits that have ended."""
+    total = 0.0
+    for e, nxt in zip(history, history[1:]):
+        if e["stage"] in ("needs-input", "needs-info"):
+            total += (_ts(nxt["at"]) - _ts(e["at"])).total_seconds() / 3600
+    return round(total, 2)
 
 
 def _median(values: list):
@@ -514,6 +580,11 @@ def _median(values: list):
         return None
     mid = len(vals) // 2
     return vals[mid] if len(vals) % 2 else round((vals[mid - 1] + vals[mid]) / 2, 2)
+
+
+def _mean(values: list):
+    vals = [v for v in values if v is not None]
+    return round(sum(vals) / len(vals), 2) if vals else None
 
 
 def _count(ms: list[dict], key: str) -> tuple[int, int]:
@@ -553,6 +624,9 @@ def scorecard(jobs: list[dict]) -> dict[str, dict]:
             "change_fail": None,
             "owner_minutes_median": _median([m["owner_minutes"] for m in merged]),
             "cost_usd_median": _median([m["cost_usd"] for m in merged]),
+            "questions_mean": _mean([m["questions"] for m in ms]),
+            "asked_after_gate": _count(ms, "asked_after_gate"),
+            "owner_wait_hours_median": _median([m["owner_wait_hours"] for m in ms]),
             "coverage": {
                 "first_pass_gate": {"eligible": first_gates, "observed": 0, "unknown": first_gates},
                 "accepted_as_built": {"eligible": len(merged), "observed": 0, "unknown": len(merged)},
@@ -572,6 +646,9 @@ SCORECARD_ROWS = [
     ("Accepted as built", "accepted_as_built"), ("Change fail rate", "change_fail"),
     ("Owner minutes per merged PR, median", "owner_minutes_median"),
     ("Cost per merged PR, median USD", "cost_usd_median"),
+    ("Questions to the owner per job, mean", "questions_mean"),
+    ("Jobs that asked after the clarify gate", "asked_after_gate"),
+    ("Hours a job waited on an answer, median", "owner_wait_hours_median"),
 ]
 SMALL_SAMPLE = 10
 

@@ -9,15 +9,17 @@ A coding-agent software factory for Claude Code: GitHub issues in, specced, test
 Code owns the loop; agents do the judging. Small deterministic scripts run job state, gates, routing and merging. Agents decide only what scripts can't: whether an issue is worth building, the spec, the code, and the review.
 
 ```
-clarify lane:  issue labelled `factory` → intake → spec → product questions?
+phase check:   milestone's issues mapped to the work it must cover; gaps → owner
+clarify lane:  issue labelled `factory` → intake → spec (standing rules first) → product questions?
                  yes → posted on the issue, label `needs-input`, wait for the owner
                  no  → ready
-build lane:    ready → pickup (re-spec if main moved) → build (tests first)
+phase gate:    builds start only when every issue in the milestone is ready (one question sheet)
+build lane:    ready → pickup (re-spec if main moved) → build (tests first; an unsettled product gap stops and asks)
                  → gate (checks, scope, eval smoke) → parallel reviewers → ≤2 fix rounds
                  → recovery → approver → auto-merge only if on the blast-radius allowlist
 ```
 
-The two lanes run side by side. While one issue builds, others are being specced and their questions are waiting for the owner. The build lane refuses to start while a spec has an open product question, so nothing is built on a guess about policy, metrics, thresholds or copy. Technical questions never stop a job: the agents ask a second model (Astra, with Fable as tiebreaker) and log the answer.
+The two lanes run side by side across phases. Within a phase (one milestone), every issue is specced and every question is answered, in one sheet, before any of its builds start, so the owner answers once instead of being interrupted mid-build. Rulings that hold for every job live in `docs/agents/standing-rules.md`, so a kind of question is asked once. The build lane refuses to start while a spec has an open product question, so nothing is built on a guess about policy, metrics, thresholds or copy. Technical questions never stop a job: the agents ask a second model (Astra, with Fable as tiebreaker) and log the answer.
 
 ## What makes it trustworthy
 
@@ -35,7 +37,7 @@ Planning to build uses [Matt Pocock's skills](https://github.com/mattpocock/skil
 
 ## Is it getting better?
 
-`factory/bin/scorecard` groups every job by the factory version that ran it and sets it beside a frozen baseline. `factory/baseline-v1.json` holds the historical four-job cohort frozen on 18 Nov 2026. The four jobs were built on 15 Nov before the planning and shipping skills were added; jobs since then are tagged `v1.1-skills`, and from 18 Nov `v1.2-two-phase` (clarify before build). Under 10 jobs a column, read the comparison as directional only.
+`factory/bin/scorecard` groups every job by the factory version that ran it and sets it beside a frozen baseline. `factory/baseline-v1.json` holds the historical four-job cohort frozen on 18 Nov 2026. The four jobs were built on 15 Nov before the planning and shipping skills were added; jobs since then are tagged `v1.1-skills`, from 18 Nov `v1.2-two-phase` (clarify before build), and from v1.3 `v1.3-phase-gate`. From v1.3 it also counts questions to the owner per job, jobs that asked after the clarify gate (phase 1 misses), and hours a job waited on an answer. Under 10 jobs a column, read the comparison as directional only.
 
 Use the [factory owner workflow](docs/agents/factory-owner-workflow.md) to log owner effort and costs, inspect job recovery, and generate an on-demand weekly report with the owner's time zone and escaped-defect follow-up window.
 

@@ -117,8 +117,8 @@ def _load_job_script():
     return mod
 
 
-class TestClarifyCommands(unittest.TestCase):
-    """job clarify / job answers against a fake GitHub."""
+class _JobScriptHarness(unittest.TestCase):
+    """A job 007-t at spec, the job script, and a fake GitHub."""
 
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
@@ -157,6 +157,10 @@ class TestClarifyCommands(unittest.TestCase):
     def run_cmd(self, name):
         return self.job.COMMANDS[name][0](self.root, self.cfg, ["007-t"])
 
+
+class TestClarifyCommands(_JobScriptHarness):
+    """job clarify / job answers against a fake GitHub."""
+
     def test_open_questions_go_to_the_issue_and_wait(self):
         (self.d / "spec.md").write_text(OPEN_SPEC)
         out = self.run_cmd("clarify")
@@ -164,7 +168,9 @@ class TestClarifyCommands(unittest.TestCase):
         self.assertEqual(F.read_job(self.d)["stage"], "needs-input")
         posted = [f["body"] for m, p, f in self.calls if p == "issues/7/comments" and m == "POST"]
         self.assertEqual(len(posted), 1)
-        self.assertIn("Q1: Should ranges cover shares too?", posted[0])
+        self.assertIn("- [ ] **7-Q1**: Should ranges cover shares too?", posted[0])
+        self.assertIn("**7-Q2**: Treat blank as false", posted[0])
+        self.assertNotIn("paused", posted[0])
         self.assertIn(("POST", "issues/7/labels", {"labels": ["needs-input"]}), self.calls)
 
     def test_clean_spec_goes_to_ready_then_build(self):
@@ -529,3 +535,161 @@ class TestGateEndToEnd(GateFixture, unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestQuestionHelpers(unittest.TestCase):
+    def test_ids_are_stable_and_replace_the_spec_numbering(self):
+        self.assertEqual(F.question_ids(71, ["Q1: Refuse NaN?", "**Q2:** Same wording?", "Plain one"]),
+                         ["71-Q1: Refuse NaN?", "71-Q2: Same wording?", "71-Q3: Plain one"])
+
+    def test_product_gaps_are_unticked_items_in_their_section_only(self):
+        build = ("## Summary\n- [ ] not a gap\n\n## Product gaps\n- [ ] Q1: Empty list allowed? "
+                 "Recommended: no.\n- [x] settled already\n\n## Notes for reviewers\n- [ ] nor this\n")
+        self.assertEqual(F.open_product_gaps(build), ["Q1: Empty list allowed? Recommended: no."])
+        self.assertEqual(F.open_product_gaps("## Summary\n- done\n"), [])
+
+    def test_coverage_missing_lines(self):
+        text = "- ingest: #66\n- MISSING: brand rules loader\nMISSING: synthetic runner\n"
+        self.assertEqual(F.coverage_missing(text), ["brand rules loader", "synthetic runner"])
+
+    def test_phase_blockers_are_same_phase_jobs_still_clarifying(self):
+        jobs = [{"id": "a", "phase": "P1", "stage": "spec"}, {"id": "b", "phase": "P1", "stage": "needs-input"},
+                {"id": "c", "phase": "P1", "stage": "ready"}, {"id": "d", "phase": "P2", "stage": "spec"},
+                {"id": "e", "stage": "intake"},
+                {"id": "f", "phase": "P1", "stage": "needs-input",
+                 "history": [{"stage": "ready"}, {"stage": "build"}, {"stage": "needs-input"}]}]
+        self.assertEqual(F.phase_blockers(jobs, "P1"), ["a", "b"])
+
+    def test_a_build_may_stop_for_the_owner(self):
+        self.assertIn("needs-input", F.TRANSITIONS["build"])
+
+
+class TestPhaseGate(_JobScriptHarness):
+    """v1.3: a phase's questions all come before any of its builds; build gaps stop and ask."""
+
+    def setUp(self):
+        super().setUp()
+        self.cfg["phase_gate"] = True
+        self.milestone_issues = [7]
+        inner = F.gh_api
+
+        def fake_gh(root, method, path, fields=None, check=True):
+            if method == "GET" and path.startswith("issues?milestone="):
+                self.calls.append((method, path, fields))
+                return [{"number": n} for n in self.milestone_issues]
+            return inner(root, method, path, fields, check)
+        for mod in (F, self.job.F):
+            mod.gh_api = fake_gh
+        job = F.read_job(self.d)
+        job.update(phase="Go port", phase_number=3)
+        F.write_job(self.d, job)
+        self.cov = F.phases_dir(self.root) / "go-port" / "coverage.md"
+
+    def add_job(self, jid, issue, stage):
+        d = F.jobs_dir(self.root) / jid
+        d.mkdir(parents=True)
+        job = F.new_job(jid, issue, jid)
+        job.update(stage=stage, phase="Go port", phase_number=3)
+        F.write_job(d, job)
+        return d
+
+    def clear_spec(self):
+        (self.d / "spec.md").write_text(CLEAN_SPEC)
+        self.run_cmd("clarify")
+
+    def test_pickup_waits_for_the_coverage_check(self):
+        self.clear_spec()
+        with self.assertRaisesRegex(F.FactoryError, "no coverage check"):
+            self.run_cmd("pickup")
+        self.cov.parent.mkdir(parents=True)
+        self.cov.write_text("- MISSING: brand rules loader\n")
+        with self.assertRaisesRegex(F.FactoryError, "not covered by any issue: brand rules loader"):
+            self.run_cmd("pickup")
+        self.cov.write_text("- brand rules: #7\n")
+        self.assertIn("build (round 1)", self.run_cmd("pickup"))
+
+    def test_pickup_waits_while_any_job_in_the_phase_is_clarifying(self):
+        self.cov.parent.mkdir(parents=True)
+        self.cov.write_text("all covered\n")
+        other = self.add_job("008-u", 8, "spec")
+        self.milestone_issues = [7, 8, 9]
+        self.clear_spec()
+        with self.assertRaises(F.FactoryError) as e:
+            self.run_cmd("pickup")
+        self.assertIn("008-u is still clarifying", str(e.exception))
+        self.assertIn("issue #9 has no job yet", str(e.exception))
+        self.assertEqual(F.read_job(self.d)["stage"], "ready")
+        self.assertEqual(self.job.cmd_lane(self.root, self.cfg, ["build"]), "nothing to do in the build lane")
+        job = F.read_job(other)
+        job["stage"] = "ready"
+        F.write_job(other, job)
+        self.milestone_issues = [7, 8]
+        self.assertEqual(self.job.cmd_lane(self.root, self.cfg, ["build"]), "007-t  ready\n008-u  ready")
+        self.assertIn("open", self.job.cmd_phase(self.root, self.cfg, ["Go", "port"]))
+        self.assertIn("build (round 1)", self.run_cmd("pickup"))
+
+    def test_jobs_without_a_milestone_are_not_gated(self):
+        job = F.read_job(self.d)
+        job.pop("phase")
+        F.write_job(self.d, job)
+        self.clear_spec()
+        self.assertIn("build (round 1)", self.run_cmd("pickup"))
+
+    def test_spec_questions_are_logged_before_the_gate(self):
+        (self.d / "spec.md").write_text(OPEN_SPEC)
+        self.run_cmd("clarify")
+        ask = F.read_job(self.d)["asks"][-1]
+        self.assertEqual((ask["count"], ask["source"], ask["after_gate"]), (2, "spec", False))
+        self.assertEqual(ask["questions"][0], "7-Q1: Should ranges cover shares too? Recommended: yes.")
+
+    def test_a_product_gap_found_while_building_stops_and_asks(self):
+        self.cov.parent.mkdir(parents=True)
+        self.cov.write_text("all covered\n")
+        self.clear_spec()
+        self.run_cmd("pickup")
+        (self.d / "build.md").write_text("## Summary\n- x\n")
+        self.assertEqual(self.run_cmd("gap"), "007-t: no product gaps")
+        self.assertEqual(F.read_job(self.d)["stage"], "build")
+        (self.d / "build.md").write_text("## Product gaps\n- [ ] Q1: Allow an empty brand list? Recommended: no.\n")
+        self.calls.clear()
+        self.assertIn("needs-input (1 gap(s)", self.run_cmd("gap"))
+        job = F.read_job(self.d)
+        self.assertEqual(job["stage"], "needs-input")
+        self.assertEqual((job["asks"][-1]["source"], job["asks"][-1]["after_gate"]), ("build", True))
+        posted = [f["body"] for m, p, f in self.calls if p == "issues/7/comments" and m == "POST"]
+        self.assertIn("**7-Q1**: Allow an empty brand list?", posted[0])
+        self.assertIn("paused", posted[0])
+        sheet = self.job.cmd_sheet(self.root, self.cfg, ["Go", "port"])
+        self.assertIn("**#7 t**\n- 7-Q1: Allow an empty brand list?", sheet)
+
+    def test_sheet_lists_every_waiting_question_and_uncovered_area(self):
+        (self.d / "spec.md").write_text(OPEN_SPEC)
+        self.run_cmd("clarify")
+        self.cov.parent.mkdir(parents=True)
+        self.cov.write_text("MISSING: synthetic runner\n")
+        sheet = self.job.cmd_sheet(self.root, self.cfg, ["Go", "port"])
+        self.assertIn("- 7-Q1: Should ranges cover shares too?", sheet)
+        self.assertIn("- 7-Q2: Treat blank as false", sheet)
+        self.assertIn("- go-port-M1: file an issue for synthetic runner?", sheet)
+        self.assertEqual(self.job.cmd_sheet(self.root, self.cfg, ["Other"]), "phase Other: no open questions")
+
+
+class TestQuestionMetrics(unittest.TestCase):
+    def test_questions_after_the_gate_and_waiting_time(self):
+        hist = [("2026-11-19T07:00:00Z", "intake", "created"), ("2026-11-19T07:01:00Z", "spec", ""),
+                ("2026-11-19T07:02:00Z", "needs-input", "2 asked"), ("2026-11-19T08:02:00Z", "spec", ""),
+                ("2026-11-19T08:03:00Z", "ready", ""), ("2026-11-19T08:04:00Z", "build", ""),
+                ("2026-11-19T08:10:00Z", "needs-input", "1 gap"), ("2026-11-19T08:40:00Z", "spec", "")]
+        job = F.new_job("071-d", 71, "d")
+        job["history"] = [{"at": a, "stage": s, "note": n} for a, s, n in hist]
+        job["stage"] = "spec"
+        job["factory_version"] = "v1.3-phase-gate"
+        job["asks"] = [{"count": 2, "source": "spec", "after_gate": False},
+                       {"count": 1, "source": "build", "after_gate": True}]
+        old = F.new_job("001-a", 1, "a")
+        m = F.job_metrics(job)
+        self.assertEqual((m["questions"], m["asked_after_gate"], m["owner_wait_hours"]), (3, True, 1.5))
+        self.assertEqual((F.job_metrics(old)["questions"], F.job_metrics(old)["asked_after_gate"]), (None, None))
+        card = F.scorecard([job, old])["v1.3-phase-gate"]
+        self.assertEqual((card["questions_mean"], card["asked_after_gate"]), (3, (1, 1)))
+        self.assertIn("| Jobs that asked after the clarify gate |", F.render_scorecard(F.scorecard([job]), None))

@@ -9,7 +9,7 @@ The factory's own rules (`AGENTS.md`, `.claude/skills/factory/SKILL.md`, the age
 | Plan | `grill-me` / `grilling` | the owner, by asking for it | Stress-test a plan in rounds before any issue exists. |
 | Plan | `to-spec` | the owner | Turn a settled plan into a GitHub issue (problem, user stories, decisions, testing, out of scope). |
 | Plan | `to-tickets` | the owner | Split a big issue into vertical-slice issues with "Blocked by" edges. Stacked jobs follow those edges. |
-| Intake | `triage` | `intake` agent | Redundancy check, `.out-of-scope/` check, needs-info notes template. Product questions found at spec time go on the issue under the same `needs-input` label, and the build waits for them. |
+| Intake | `triage` | `intake` agent | Redundancy check, `.out-of-scope/` check, needs-info notes template. Product questions found at spec time go on the issue under the same `needs-input` label, and the build waits for them. Standing rules (`docs/agents/standing-rules.md`) settle repeat questions without asking. |
 | Spec | `to-spec`, `codebase-design` | `spec-writer` agent | Problem statement, short user stories, seams under test, out of scope. |
 | Build | `tdd` | `builder` agent | One test, then the code for it, at the spec's seams; no tautological or implementation-coupled tests. |
 | Review | Pocock's two-axis review | `reviewer-code` agent | Standards and Spec reported separately; code smells are notes, never blockers on their own. |
