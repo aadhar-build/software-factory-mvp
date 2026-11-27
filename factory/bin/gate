@@ -7,35 +7,41 @@
 Checks, in order: protected paths untouched, every change inside the spec's
 ## Files list, then the main checkout's factory/checks.sh run inside the
 worktree (so a branch can't edit the checks it is judged by).
-Writes round-<n>/checks.md (or final-checks.md) and prints one line ending PASS or FAIL.
+Writes round-<n>/checks.md (or final-checks.md) and prints a PASS or FAIL status.
+When retries run out, the status is followed by a recovery question.
+A surviving .gate-publication.pending means publication was interrupted. Inspect
+the job and receipt before removing it: discard the receipt if the job is still
+in gate, or verify the committed transition and receipt if it has moved on.
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 
+sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 import factory as F  # noqa: E402
+from factory_recovery import recovery_transition_output  # noqa: E402
 
 LOG_TAIL = 120
 
 
-def main(argv: list[str]) -> int:
-    if not argv:
-        print(__doc__.strip())
-        return 2
-    final = "--final" in argv
-    job_id = argv[0]
-    try:
-        root = F.repo_root()
-        cfg = F.load_config(root)
-        d = F.job_dir(root, job_id)
-        job = F.read_job(d)
-        if not final and job["stage"] != "gate":
-            raise F.FactoryError(f"job is in {job['stage']}, not gate")
-        wt = root / job["worktree"]
+def run_gate(root: Path, cfg: dict, d: Path, *, final: bool, gate_fd: int | None = None) -> tuple[str, dict]:
+    with ExitStack() as locks:
+        with F.job_mutex(d):
+            F.require_admission(d)
+            job = F.read_job(d)
+            if not final and job["stage"] != "gate":
+                raise F.FactoryError(f"job is in {job['stage']}, not gate")
+            wt = root / job["worktree"]
+            if gate_fd is None:
+                gate_fd = locks.enter_context(F.gate_worktree_lock(wt))
+            elif not os.path.samestat(os.fstat(gate_fd), wt.stat(follow_symlinks=False)):
+                raise F.FactoryError("worktree changed after merge acquired its gate lock")
         changed = F.changed_files(wt, cfg["base_branch"], job)
         problems: list[str] = []
 
@@ -56,8 +62,9 @@ def main(argv: list[str]) -> int:
             problems.append("The branch has no changes against the base")
 
         checks = root / "factory" / "checks.sh"
+        # The checks process keeps the worktree lock even if this gate exits early.
         res = subprocess.run(["bash", str(checks)], cwd=str(wt), capture_output=True, text=True,
-                             timeout=cfg.get("checks_timeout_s", 1200))
+                             pass_fds=(gate_fd,), timeout=cfg.get("checks_timeout_s", 1200))
         log = (res.stdout + res.stderr).splitlines()
         if res.returncode != 0:
             problems.append(f"checks.sh exited {res.returncode}")
@@ -69,25 +76,60 @@ def main(argv: list[str]) -> int:
         lines += [f"- {c}" for c in changed] or ["- (none)"]
         lines += ["", f"## checks.sh output (last {LOG_TAIL} lines)", "", "```"] + log[-LOG_TAIL:] + ["```", ""]
 
+        with F.job_mutex(d):
+            F.require_admission(d)
+            if F.read_job(d) != job:
+                raise F.FactoryError("job changed while the gate ran")
+            receipt = "\n".join(lines).encode("utf-8")
+            if final:
+                F.atomic_write(d / "final-checks.md", receipt)
+                return verdict, job
+            round_number = job["round"]
+            if type(round_number) is not int or round_number < 1:
+                raise F.FactoryError("invalid round number")
+            rd = d / f"round-{round_number}"
+            if rd.is_symlink():
+                raise F.FactoryError("round directory must not be a symlink")
+            try:
+                rd.mkdir(exist_ok=True)
+            except FileExistsError as exc:
+                raise F.FactoryError("round path must be a directory") from exc
+            marker = d / F.GATE_PENDING
+            F.atomic_write(marker, f"round-{round_number}\n".encode())
+            F.atomic_write(rd / "checks.md", receipt)
+            if verdict == "PASS":
+                F.move(job, "review", "gate passed")
+            else:
+                F.next_round_or_recovery(job, cfg["max_rounds"], "gate failed")
+            F.write_job(d, job, publishing_gate=True)
+            F.remove_marker(marker)
+        return verdict, job
+
+
+def main(argv: list[str]) -> int:
+    if not argv:
+        print(__doc__.strip())
+        return 2
+    final = "--final" in argv
+    job_id = argv[0]
+    try:
+        root = F.repo_root()
+        d = F.job_dir(root, job_id)
+        verdict, job = run_gate(root, F.load_config(root), d, final=final)
         if final:
-            (d / "final-checks.md").write_text("\n".join(lines))
             print(f"{job_id} final gate {verdict}")
             return 0
-        rd = d / f"round-{job['round']}"
-        rd.mkdir(exist_ok=True)
-        (rd / "checks.md").write_text("\n".join(lines))
-        if verdict == "PASS":
-            F.move(job, "review", "gate passed")
-        else:
-            F.next_round_or_recovery(job, cfg["max_rounds"], "gate failed")
-        F.write_job(d, job)
-        print(f"{job_id} -> {job['stage']}: gate {verdict}")
+        status_line = f"{job_id} -> {job['stage']}: gate {verdict}"
+        print(recovery_transition_output(status_line, d, job))
         return 0
     except F.FactoryError as e:
         print(f"REFUSED: {e}")
         return 1
     except subprocess.TimeoutExpired:
         print(f"REFUSED: checks.sh timed out for {job_id}")
+        return 1
+    except OSError as e:
+        print(f"REFUSED: could not read or publish gate evidence for {job_id}: {e}")
         return 1
 
 

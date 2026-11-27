@@ -37,7 +37,9 @@ Planning to build uses [Matt Pocock's skills](https://github.com/mattpocock/skil
 
 ## Is it getting better?
 
-`factory/bin/scorecard` groups every job by the factory version that ran it and sets it beside a frozen baseline. `factory/baseline-v1.json` holds v1's numbers from its first 4 jobs (15 Nov 2026), taken before the planning and shipping skills were added; jobs since then are tagged `v1.1-skills`, from 18 Nov `v1.2-two-phase` (clarify before build), and from v1.3 `v1.3-phase-gate`. From v1.3 it also counts questions to the owner per job, jobs that asked after the clarify gate (phase 1 misses), and hours a job waited on an answer. Under 10 jobs a column, read the comparison as directional only.
+`factory/bin/scorecard` groups every job by the factory version that ran it and sets it beside a frozen baseline. `factory/baseline-v1.json` holds the historical four-job cohort frozen on 18 Nov 2026. The four jobs were built on 15 Nov before the planning and shipping skills were added; jobs since then are tagged `v1.1-skills`, from 18 Nov `v1.2-two-phase` (clarify before build), and from v1.3 `v1.3-phase-gate`. From v1.3 it also counts questions to the owner per job, jobs that asked after the clarify gate (phase 1 misses), and hours a job waited on an answer. Under 10 jobs a column, read the comparison as directional only.
+
+Use the [factory owner workflow](docs/agents/factory-owner-workflow.md) to log owner effort and costs, inspect job recovery, and generate an on-demand weekly report with the owner's time zone and escaped-defect follow-up window.
 
 ## What's in it
 

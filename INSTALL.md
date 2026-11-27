@@ -17,7 +17,13 @@ THIRD_PARTY_NOTICES.md
 docs/agents/*.md
 .claude/settings.json
 factory/bin/job  factory/bin/gate  factory/bin/route
-factory/lib/factory.py
+factory/bin/scorecard  factory/bin/adversarial-report  factory/bin/evidence-bundle
+factory/lib/factory.py  factory/lib/observations.py  factory/lib/guardrails.py
+factory/lib/evidence_adapter.py  factory/lib/factory_recovery.py  factory/lib/merge_evidence.py
+factory/lib/decision_card.py  factory/lib/scorecard_report.py  factory/lib/job_links.py
+factory/lib/evidence_bundle.py  factory/lib/weekly_evidence.py  factory/lib/scorecard_source.py
+factory/lib/owner_decision_view.py
+factory/baseline-v1.json
 factory/config.json
 factory/checks.sh
 ```
@@ -40,4 +46,15 @@ factory/checks.sh
 
 - `bash factory/checks.sh` passes on the base branch. With Python 3.12+, `unittest` exits non-zero when it finds no tests, so a new repo needs at least one smoke test before the first job.
 - `factory/bin/job list` prints `no jobs`.
+- Run `factory/bin/scorecard --json` in the empty install. It prints `{}`. In a disposable checkout, run `factory/bin/scorecard --weekly 2026-11-16 --timezone UTC --defect-window-days 14 --json` with those fixture settings and confirm zero delivered jobs. Compare the copied baseline bytes to the source and retain its four-job historical cohort.
+- In a disposable checkout, exercise the [observation and correction example](docs/agents/factory-owner-workflow.md#submit-and-correct-an-observation) with fixture values. Replay it with the same ID and check that the recording time is preserved. Submit the correction, then confirm that the job card reads the corrected effort, the recovery summary still reads the job, and the job state is byte-identical.
+- Confirm the reporting executables have their execute bits. Run `factory/bin/adversarial-report --candidate <full-commit-sha> --json` against the trusted local candidate. Keep the report with its candidate hash and observed, missed, or missing case results.
+- Run `factory/bin/evidence-bundle --help` to confirm the offline exporter and its imports are available. Use the [owner workflow](docs/agents/factory-owner-workflow.md#open-selected-job-evidence-offline) to export a synthetic job to a new directory and verify that `index.html` links to its manifest and selected receipt projections.
+- Exercise `--private-owner-view` with a disposable, synthetic job marked with the normal job origin. Verify that criterion labels appear in the private HTML, selected links open the correct projected receipts, and the command refuses a destination inside a checkout linked to the factory.
 - Report what was copied, what was adapted, and the allowlist for the owner to confirm.
+
+## Observation and reporting data
+
+Use the [factory owner workflow](docs/agents/factory-owner-workflow.md) to capture typed observations, preserve the local ledger during updates, review recovery and produce on-demand weekly reports. Legacy job fields without recording timestamps remain separately identified in the report. Canonical gate and review Markdown are historical evidence. A stabilized installation can verify bound receipts and worker audits locally when their candidate, base, spec, round, and publication state can all be established.
+
+If an existing repository webhook has a closed, merged pull-request delivery, record a `check_evidence` observation with `source.kind` set to `controller`, `data.check_id` set to `merged_candidate`, `data.verdict` set to `pass`, and the candidate SHA and round. In `evidence` point to the same repository's `https://api.github.com/repos/OWNER/REPO/hooks/HOOK_ID/deliveries/DELIVERY_ID` record. The weekly `--verify-github-merges` option performs the read through the authenticated GitHub CLI using existing Webhooks read access. An expired, inaccessible, or mismatched delivery leaves the exact merged candidate unknown. The report records only the verified merge identifiers and timestamp. [GitHub webhook delivery endpoint](https://docs.github.com/en/rest/repos/webhooks#get-a-delivery-for-a-repository-webhook)

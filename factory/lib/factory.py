@@ -8,10 +8,17 @@ allowlist). Standard library only, so it runs anywhere Python 3.10+ does.
 from __future__ import annotations
 
 import datetime as _dt
+import fcntl
 import fnmatch
 import json
+import math
+import os
 import re
+import stat
 import subprocess
+import tempfile
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 # --------------------------------------------------------------------------
@@ -50,6 +57,10 @@ class FactoryError(Exception):
     """A refused action. The message is shown to the orchestrator as is."""
 
 
+class FactoryBusy(FactoryError):
+    """A concurrent command holds a required lock."""
+
+
 # --------------------------------------------------------------------------
 # Paths and config
 # --------------------------------------------------------------------------
@@ -84,10 +95,31 @@ def phases_dir(root: Path) -> Path:
 
 
 def job_dir(root: Path, job_id: str) -> Path:
+    if not valid_reporting_job_id(job_id):
+        raise FactoryError(f"invalid job ID {job_id!r}")
     d = jobs_dir(root) / job_id
+    if any(path.is_symlink() for path in (d.parent.parent, d.parent, d)):
+        raise FactoryError("job directory must be a real directory")
     if not (d / "job.json").exists():
         raise FactoryError(f"no job {job_id}")
     return d
+
+
+def reporting_job_dir(root: Path, job_id: str) -> Path:
+    """Refuse aliases and non-job paths for observation commands."""
+    if not valid_reporting_job_id(job_id):
+        raise FactoryError("invalid job ID")
+    folder = jobs_dir(root) / job_id
+    state = folder / "job.json"
+    if any(path.is_symlink() for path in (folder.parent.parent, folder.parent, folder, state)):
+        raise FactoryError(f"job {job_id} must use a real job directory and state file")
+    if not state.is_file():
+        raise FactoryError(f"no job {job_id}")
+    return folder
+
+
+def valid_reporting_job_id(job_id: str) -> bool:
+    return re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", job_id) is not None
 
 
 def slugify(text: str, words: int = 4) -> str:
@@ -108,14 +140,150 @@ def now() -> str:
 # --------------------------------------------------------------------------
 
 
+GATE_PENDING = ".gate-publication.pending"
+_held_mutex = ContextVar("factory_job_mutex", default=None)
+
+
+@contextmanager
+def _directory_lock(d: Path, busy: str):
+    # Lock the directory inode itself so a replaced lock file cannot split ownership.
+    try:
+        fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise FactoryError(f"cannot open directory {d.name}") from exc
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise FactoryBusy(busy) from exc
+        yield fd
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def job_mutex(d: Path):
+    owner = (os.getpid(), d)
+    if _held_mutex.get() == owner:
+        yield
+        return
+    if any(path.is_symlink() for path in (d.parent.parent, d.parent, d)):
+        raise FactoryError("job directory must be a real directory")
+    with _directory_lock(d, f"job {d.name} is busy; retry"):
+        token = _held_mutex.set(owner)
+        try:
+            yield
+        finally:
+            _held_mutex.reset(token)
+
+
+def gate_worktree_lock(wt: Path):
+    return _directory_lock(wt, "another gate is running on this worktree; retry after it exits")
+
+
+def require_admission(d: Path) -> None:
+    if os.path.lexists(d / GATE_PENDING):
+        raise FactoryError("gate publication interrupted; reconcile the receipt and job before retrying")
+
+
+def _sync_directory(folder: Path) -> None:
+    fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def atomic_write(path: Path, content: bytes) -> None:
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".factory-tmp-", delete=False) as stream:
+        tmp = Path(stream.name)
+        try:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+            os.replace(tmp, path)
+            _sync_directory(path.parent)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+
+def remove_marker(path: Path) -> None:
+    path.unlink()
+    _sync_directory(path.parent)
+
+
 def read_job(d: Path) -> dict:
-    return json.loads((d / "job.json").read_text())
+    try:
+        fd = os.open(d / "job.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise FactoryError("job.json must be a regular file")
+            job = json.load(stream)
+        if not isinstance(job, dict):
+            raise FactoryError("job.json must contain an object")
+        revision = job.get("revision", 0)
+        if type(revision) is not int or revision < 0:
+            raise FactoryError("invalid job revision")
+        return job
+    except (OSError, ValueError) as exc:
+        raise FactoryError("invalid or unreadable job.json") from exc
 
 
-def write_job(d: Path, job: dict) -> None:
-    tmp = d / "job.json.tmp"
-    tmp.write_text(json.dumps(job, indent=2) + "\n")
-    tmp.replace(d / "job.json")
+def validate_reporting_job(job, job_id: str) -> dict:
+    """Validate the stored fields used by reporting and tolerate missing legacy dates."""
+    if not isinstance(job, dict) or job.get("id") != job_id:
+        raise FactoryError(f"invalid or unreadable job state for {job_id}")
+    history = job.get("history")
+    if history is None:
+        history = []
+    if not isinstance(history, list) or any(
+        not isinstance(step, dict) or any(step.get(key) is not None and not isinstance(step[key], str)
+                                          for key in ("stage", "note", "at"))
+        for step in history
+    ):
+        raise FactoryError(f"job {job_id} has malformed history")
+    surfaces, reviewers = job.get("surfaces"), job.get("reviewers")
+    if surfaces is not None and (not isinstance(surfaces, list) or any(not isinstance(s, str) for s in surfaces)):
+        raise FactoryError(f"job {job_id} has malformed surfaces")
+    if reviewers is not None and (not isinstance(reviewers, dict)
+                                  or any(not isinstance(model, str) for model in reviewers.values())):
+        raise FactoryError(f"job {job_id} has malformed reviewers")
+    for field in ("stage", "risk", "branch", "worktree", "stacked_on_branch", "factory_version", "origin"):
+        value = job.get(field)
+        if value is not None and not isinstance(value, str):
+            raise FactoryError(f"job {job_id} has malformed {field}")
+    if "round" in job and (type(job["round"]) is not int or job["round"] < 0):
+        raise FactoryError(f"job {job_id} has malformed round")
+    for field in ("owner_minutes", "cost_usd"):
+        value = job.get(field)
+        if value is not None:
+            try:
+                valid = type(value) in (int, float) and math.isfinite(value) and value >= 0
+            except OverflowError:
+                valid = False
+            if not valid:
+                raise FactoryError(f"job {job_id} has malformed {field}")
+    for field in ("escaped", "owner_changes"):
+        value = job.get(field)
+        if value is not None and type(value) is not bool:
+            raise FactoryError(f"job {job_id} has malformed {field}")
+    normalized_history = [step if _ts(step.get("at")) is not None else {**step, "at": None} for step in history]
+    return {**job, "history": normalized_history}
+
+
+def write_job(d: Path, job: dict, *, publishing_gate: bool = False) -> None:
+    # The gate alone writes state with a pending marker, while holding the
+    # mutex continuously from admission through marker removal.
+    if publishing_gate and _held_mutex.get() != (os.getpid(), d):
+        raise FactoryError("gate publication requires the job mutex")
+    with job_mutex(d):
+        if not publishing_gate:
+            require_admission(d)
+        path = d / "job.json"
+        revision = read_job(d).get("revision", 0) if os.path.lexists(path) else 0
+        updated = {**job, "revision": revision + 1}
+        atomic_write(path, (json.dumps(updated, indent=2) + "\n").encode())
+        job["revision"] = updated["revision"]
 
 
 def new_job(job_id: str, issue: int, title: str) -> dict:
@@ -346,42 +514,47 @@ def allowed_files(spec_text: str) -> list[str]:
 BASE_VERSION = "v1"
 
 
-def _ts(at: str) -> _dt.datetime:
-    return _dt.datetime.strptime(at, "%Y-%m-%dT%H:%M:%SZ")
+def _ts(at: str | None) -> _dt.datetime | None:
+    if not isinstance(at, str):
+        return None
+    try:
+        value = _dt.datetime.fromisoformat(at.replace("Z", "+00:00"))
+        return value.astimezone(_dt.timezone.utc) if value.utcoffset() is not None else None
+    except (ValueError, OverflowError):
+        return None
 
 
 def job_metrics(job: dict) -> dict:
     """What one job's history says: timings, gate, escalation, merge path."""
-    h = job["history"]
-    stages = [e["stage"] for e in h]
-    created = _ts(h[0]["at"])
+    h = job.get("history") or []
+    stages = [e.get("stage") for e in h]
+    created = _ts(h[0].get("at")) if h else None
     ready = None
     for i, e in enumerate(h):
-        if e["stage"] == "needs-human" or (e["stage"] == "merged" and i and h[i - 1]["stage"] == "merging"):
-            ready = _ts(e["at"])
+        if stages[i] == "needs-human" or (stages[i] == "merged" and i and stages[i - 1] == "merging"):
+            ready = _ts(e.get("at"))
             break
-    merged = next((_ts(e["at"]) for e in h if e["stage"] == "merged"), None)
-    first_pass = None
-    if "gate" in stages:
-        i = stages.index("gate")
-        first_pass = i + 1 < len(stages) and stages[i + 1] == "review"
+    merged = next((_ts(e.get("at")) for e in h if e.get("stage") == "merged"), None)
+    merge_recorded = "merged" in stages or job.get("stage") == "merged"
     escalated = None
-    if any(e["note"] == "approver escalated" for e in h):
+    if any(e.get("note") == "approver escalated" for e in h):
         escalated = True
     elif "merging" in stages:
         escalated = False
     return {
-        "merged": merged is not None,
-        "rejected": job["stage"] == "rejected",
-        "agent_minutes": round((ready - created).total_seconds() / 60, 2) if ready else None,
-        "lead_hours": round((merged - created).total_seconds() / 3600, 2) if merged else None,
+        "merged": merge_recorded,
+        "rejected": job.get("stage") == "rejected",
+        "agent_minutes": round((ready - created).total_seconds() / 60, 2) if ready and created else None,
+        "lead_hours": round((merged - created).total_seconds() / 3600, 2) if merged and created else None,
         "merged_at": merged,
-        "first_pass_gate": first_pass,
+        "first_pass_gate": None,
+        "first_gate_attempted": "gate" in stages or job.get("stage") == "gate",
         "rounds": job.get("round", 0),
         "escalated": escalated,
         "auto_merged": merged is not None and "merging" in stages and stages[stages.index("merged") - 1] == "merging",
-        "accepted_as_built": not job.get("owner_changes", False),
-        "escaped": bool(job.get("escaped", False)),
+        "accepted_as_built": None,
+        "escaped": job.get("escaped") if type(job.get("escaped")) is bool else None,
+        "owner_changes": job.get("owner_changes") if type(job.get("owner_changes")) is bool else None,
         "owner_minutes": job.get("owner_minutes"),
         "cost_usd": job.get("cost_usd"),
         # v1.3: asks are logged from v1.3 on, so older jobs report None, not zero.
@@ -423,33 +596,43 @@ def scorecard(jobs: list[dict]) -> dict[str, dict]:
     """One card per factory version. Pairs are (count, out of)."""
     groups: dict[str, list[dict]] = {}
     for job in jobs:
-        groups.setdefault(job.get("factory_version", BASE_VERSION), []).append(job_metrics(job))
+        if job.get("origin") == "controlled":
+            continue
+        groups.setdefault(job.get("factory_version") or BASE_VERSION, []).append(job_metrics(job))
     cards = {}
     for version, ms in groups.items():
         merged = [m for m in ms if m["merged"]]
+        stamped_merges = [m["merged_at"] for m in merged if m["merged_at"] is not None]
         weeks = 1.0
-        if len(merged) > 1:
-            span = max(m["merged_at"] for m in merged) - min(m["merged_at"] for m in merged)
+        if len(stamped_merges) > 1:
+            span = max(stamped_merges) - min(stamped_merges)
             weeks = max(1.0, span.total_seconds() / (7 * 86400))
+        first_gates = sum(m["first_gate_attempted"] for m in ms)
         cards[version] = {
             "version": version,
             "jobs": len(ms),
             "merged": len(merged),
             "rejected": sum(1 for m in ms if m["rejected"]),
-            "merges_per_week": round(len(merged) / weeks, 2),
+            "merges_per_week": round(len(merged) / weeks, 2) if len(merged) == len(stamped_merges) else None,
             "agent_minutes_median": _median([m["agent_minutes"] for m in ms]),
             "lead_hours_median": _median([m["lead_hours"] for m in merged]),
-            "first_pass_gate": _count(ms, "first_pass_gate"),
+            "first_pass_gate": None,
             "rounds_mean": round(sum(m["rounds"] for m in merged) / len(merged), 2) if merged else None,
             "escalated": _count(ms, "escalated"),
             "auto_merged": (sum(1 for m in merged if m["auto_merged"]), len(merged)),
-            "accepted_as_built": (sum(1 for m in merged if m["accepted_as_built"]), len(merged)),
-            "change_fail": (sum(1 for m in merged if m["escaped"]), len(merged)),
+            "accepted_as_built": None,
+            "change_fail": None,
             "owner_minutes_median": _median([m["owner_minutes"] for m in merged]),
             "cost_usd_median": _median([m["cost_usd"] for m in merged]),
             "questions_mean": _mean([m["questions"] for m in ms]),
             "asked_after_gate": _count(ms, "asked_after_gate"),
             "owner_wait_hours_median": _median([m["owner_wait_hours"] for m in ms]),
+            "coverage": {
+                "first_pass_gate": {"eligible": first_gates, "observed": 0, "unknown": first_gates},
+                "accepted_as_built": {"eligible": len(merged), "observed": 0, "unknown": len(merged)},
+                "change_fail": {"eligible": len(merged), "observed": 0, "unknown": len(merged),
+                                "legacy_affected": sum(m["escaped"] is True for m in merged)},
+            },
         }
     return cards
 
@@ -479,19 +662,54 @@ def _cell(value) -> str:
     return str(value)
 
 
+_MARKDOWN_CODE_TEXT = re.compile(r"://|www\.|@|#[0-9]|^(?:[-+]|[0-9]{1,9}[.)])(?: |$)", re.IGNORECASE)
+
+
+def markdown_code(value) -> str:
+    """Render a literal, single-line code span, including any embedded backticks."""
+    text = " ".join(str(value).split())
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    delimiter = "`" * (longest + 1)
+    if text.startswith("`") or text.endswith("`"):
+        text = f" {text} "
+    return f"{delimiter}{text}{delimiter}"
+
+
+def markdown_text(value, *, table_cell: bool = False) -> str:
+    """Render untrusted display text without Markdown markup or automatic links."""
+    text = " ".join(str(value).split())
+    if _MARKDOWN_CODE_TEXT.search(text):
+        span = markdown_code(text)
+        return span.replace("|", r"\|") if table_cell else span
+    return re.sub(r"([\\`*_\[\]<>~|#&])", r"\\\1", text)
+
+
 def render_scorecard(cards: dict[str, dict], baseline: dict | None) -> str:
     """Markdown: the frozen baseline, then every other version's card beside it."""
     base_version = (baseline or {}).get("version", BASE_VERSION)
     others = [v for v in sorted(cards) if v != base_version]
-    head = ["Metric", f"{base_version} baseline (frozen)"] + [f"{v} (n = {cards[v]['jobs']})" for v in others]
+    head = ["Metric", f"{markdown_text(base_version, table_cell=True)} baseline (frozen)"]
+    head += [f"{markdown_text(v, table_cell=True)} (n = {cards[v]['jobs']})" for v in others]
     lines = ["| " + " | ".join(head) + " |", "|" + " --- |" * len(head)]
     for label, key in SCORECARD_ROWS:
-        row = [label, _cell((baseline or {}).get(key))] + [_cell(cards[v].get(key)) for v in others]
+        row = [label, _cell((baseline or {}).get(key))]
+        for version in others:
+            card = cards[version]
+            coverage = card.get("coverage", {}).get(key)
+            value = _cell(card.get(key))
+            if coverage and coverage["eligible"]:
+                value += f" ({coverage['observed']}/{coverage['eligible']} observed, {coverage['unknown']} unknown)"
+            row.append(value)
         lines.append("| " + " | ".join(row) + " |")
     small = [v for v in others if cards[v]["jobs"] < SMALL_SAMPLE]
     if small or (baseline and baseline.get("jobs", 0) < SMALL_SAMPLE):
         lines += ["", f"Fewer than {SMALL_SAMPLE} jobs in a column, so the comparison is directional only. "
                   "Report every rate with its count."]
+    if baseline and baseline.get("notes"):
+        lines.extend(["", "Historical baseline notes"])
+        lines.extend(f"- {note}" for note in baseline["notes"].values())
+        if base_version == BASE_VERSION and baseline["notes"].get("frozen", "").startswith("2026-11-18"):
+            lines.append("- The owner-reported ‘1 day’ has unresolved unit and scope.")
     return "\n".join(lines) + "\n"
 
 
@@ -617,17 +835,26 @@ def changed_files(worktree: Path, base: str, job: dict | None = None) -> list[st
 # --------------------------------------------------------------------------
 
 
-def repo_slug(root: Path) -> str:
-    url = run(["git", "remote", "get-url", "origin"], cwd=root).strip()
+def repo_slug(root: Path, *, remote: str | None = None) -> str:
+    url = remote if remote is not None else run(["git", "remote", "get-url", "origin"], cwd=root).strip()
     m = re.search(r"github\.com[:/]+([^/]+/[^/]+?)(?:\.git)?/?$", url)
     if not m:
-        raise FactoryError(f"origin is not a GitHub repo: {url}")
+        raise FactoryError("origin is not a GitHub repo")
     return m.group(1)
 
 
 def gh_api(root: Path, method: str, path: str, fields: dict | None = None, check: bool = True):
     """Call the GitHub REST API for this repo. `path` is relative to repos/<owner>/<repo>."""
-    cmd = ["gh", "api", "-X", method, f"repos/{repo_slug(root)}/{path}" if path else f"repos/{repo_slug(root)}"]
+    from job_links import PublicGitHubResponse, public_repo
+
+    remote = run(["git", "remote", "get-url", "origin"], cwd=root).removesuffix("\n")
+    repo = repo_slug(root, remote=remote)
+    cmd = ["gh", "api", "-X", method, f"repos/{repo}/{path}" if path else f"repos/{repo}"]
+    link_endpoint = (method == "GET" and re.fullmatch(r"issues/[1-9][0-9]*", path)
+                     or method == "POST" and path == "pulls")
+    capture = link_endpoint and os.environ.get("GH_HOST", "github.com") == "github.com" and public_repo(remote) == repo
+    if capture:
+        cmd += ["--hostname", "github.com"]
     for key, value in (fields or {}).items():
         if isinstance(value, list):
             for v in value:
@@ -638,7 +865,8 @@ def gh_api(root: Path, method: str, path: str, fields: dict | None = None, check
             cmd += ["-f", f"{key}={value}"]
     out = run(cmd, check=check)
     try:
-        return json.loads(out) if out.strip() else None
+        data = json.loads(out) if out.strip() else None
+        return PublicGitHubResponse(data, repo) if capture and isinstance(data, dict) else data
     except json.JSONDecodeError:
         return None
 

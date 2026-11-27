@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """The factory's job tool: the only writer of job.json.
 
-Each command prints one line, so the orchestrator's context stays small.
-
   job queue                   open issue numbers labelled for the factory
   job labels                  create the factory's labels in the repo
   job create <issue>          start a job for a labelled issue; writes issue.md
@@ -26,21 +24,43 @@ Each command prints one line, so the orchestrator's context stays small.
   job reject <id>             reason on stdin; comments, unlabels, closes the PR
   job record <id> <key> <v>   owner-reported numbers for the scorecard: owner_minutes,
                               cost_usd, escaped (true/false), owner_changes (true/false)
+  job observe <id> <file|->   append one v1 JSON observation from a file or stdin
+  job card <id> [--verify-github-links]   render the owner's decision card
+  job recovery <id>           report recovery evidence as JSON
 """
 
 from __future__ import annotations
 
 import json
+import math
+import os
+import runpy
+import stat
+import subprocess
 import sys
+from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 
+sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 import factory as F  # noqa: E402
+from factory_recovery import recovery_transition_output  # noqa: E402
 
 
 def _load(root: Path, job_id: str) -> tuple[Path, dict]:
     d = F.job_dir(root, job_id)
     return d, F.read_job(d)
+
+
+def _admitted(fn):
+    @wraps(fn)
+    def run(root, cfg, args):
+        d = F.job_dir(root, args[0])
+        with F.job_mutex(d):
+            F.require_admission(d)
+            return fn(root, cfg, args)
+    return run
 
 
 def _label(cfg: dict, key: str) -> str:
@@ -65,6 +85,8 @@ def _write_issue_md(root: Path, d: Path, issue: int, data: dict) -> None:
 
 
 def cmd_create(root: Path, cfg: dict, args: list[str]) -> str:
+    from job_links import capture_source
+
     issue = int(args[0])
     data = F.gh_api(root, "GET", f"issues/{issue}")
     if data.get("pull_request"):
@@ -81,6 +103,7 @@ def cmd_create(root: Path, cfg: dict, args: list[str]) -> str:
     d.mkdir(parents=True)
     _write_issue_md(root, d, issue, data)
     job = F.new_job(job_id, issue, data["title"])
+    capture_source(root, d, job, data)
     job["factory_version"] = cfg.get("version", F.BASE_VERSION)
     if data.get("milestone"):
         job["phase"] = data["milestone"]["title"]
@@ -122,6 +145,7 @@ def cmd_show(root: Path, cfg: dict, args: list[str]) -> str:
     return json.dumps(job, indent=2)
 
 
+@_admitted
 def cmd_advance(root: Path, cfg: dict, args: list[str]) -> str:
     d, job = _load(root, args[0])
     if args[1] == "build":
@@ -147,6 +171,7 @@ def _remove_label(root: Path, number: int, label: str) -> None:
     F.gh_api(root, "DELETE", f"issues/{number}/labels/{label}", check=False)
 
 
+@_admitted
 def cmd_intake(root: Path, cfg: dict, args: list[str]) -> str:
     d, job = _load(root, args[0])
     text = (d / "intake.md").read_text()
@@ -170,6 +195,7 @@ def cmd_intake(root: Path, cfg: dict, args: list[str]) -> str:
     return f"{job['id']} -> {job['stage']}"
 
 
+@_admitted
 def cmd_worktree(root: Path, cfg: dict, args: list[str]) -> str:
     """job worktree <id> [--on <upstream-id>]: stack on a job that isn't merged yet."""
     d, job = _load(root, args[0])
@@ -197,7 +223,10 @@ def _pr_state(root: Path, number: int) -> dict:
     return F.gh_api(root, "GET", f"pulls/{number}") or {}
 
 
+@_admitted
 def cmd_pr(root: Path, cfg: dict, args: list[str]) -> str:
+    from job_links import capture_candidate
+
     d, job = _load(root, args[0])
     wt = root / job["worktree"]
     F.run(["git", "push", "--quiet", "-u", "origin", job["branch"]], cwd=wt)
@@ -211,11 +240,13 @@ def cmd_pr(root: Path, cfg: dict, args: list[str]) -> str:
     pr = F.gh_api(root, "POST", "pulls", {"title": job["title"], "head": job["branch"],
                                           "base": pr_base, "body": body})
     job["pr"] = pr["number"]
+    capture_candidate(root, job, pr)
     F.write_job(d, job)
     _add_label(root, job["pr"], _label(cfg, "queue"))
     return f"opened PR #{job['pr']}"
 
 
+@_admitted
 def cmd_clarify(root: Path, cfg: dict, args: list[str]) -> str:
     """Phase 1 exit. Open product questions: ask on the issue and wait. None: build."""
     d, job = _load(root, args[0])
@@ -305,6 +336,7 @@ def cmd_sheet(root: Path, cfg: dict, args: list[str]) -> str:
     return f"Questions for phase {phase}. Answer by id; each issue's own answers go on that issue." + "\n".join(lines)
 
 
+@_admitted
 def cmd_gap(root: Path, cfg: dict, args: list[str]) -> str:
     """After a build round: a product decision the builder met that nothing settles stops the job."""
     d, job = _load(root, args[0])
@@ -320,6 +352,7 @@ def cmd_gap(root: Path, cfg: dict, args: list[str]) -> str:
     return f"{job['id']} -> needs-input ({len(gaps)} gap(s) found while building)"
 
 
+@_admitted
 def cmd_pickup(root: Path, cfg: dict, args: list[str]) -> str:
     """Build lane entry. If the base moved since the spec was written, send it back to spec."""
     d, job = _load(root, args[0])
@@ -340,6 +373,7 @@ def cmd_pickup(root: Path, cfg: dict, args: list[str]) -> str:
     return f"{job['id']} -> build (round {job['round']})"
 
 
+@_admitted
 def cmd_answers(root: Path, cfg: dict, args: list[str]) -> str:
     """Resume a needs-input job once the owner has answered and removed the label."""
     d, job = _load(root, args[0])
@@ -356,6 +390,7 @@ def cmd_answers(root: Path, cfg: dict, args: list[str]) -> str:
     return f"{job['id']} -> spec (issue.md refreshed with the owner's answers)"
 
 
+@_admitted
 def cmd_tally(root: Path, cfg: dict, args: list[str]) -> str:
     d, job = _load(root, args[0])
     rd = d / f"round-{job['round']}"
@@ -371,9 +406,14 @@ def cmd_tally(root: Path, cfg: dict, args: list[str]) -> str:
     else:
         F.move(job, "approve", "all reviews passed")
     F.write_job(d, job)
-    return f"{job['id']} -> {job['stage']} ({', '.join(f'{n}:{v}' for n, v in verdicts.items())})"
+    if job["stage"] == "recovery":
+        verdicts = {name: verdict if verdict in {"PASS", "CHANGES"} else "UNVERIFIED"
+                    for name, verdict in verdicts.items()}
+    status = f"{job['id']} -> {job['stage']} ({', '.join(f'{n}:{v}' for n, v in verdicts.items())})"
+    return recovery_transition_output(status, d, job)
 
 
+@_admitted
 def cmd_decide(root: Path, cfg: dict, args: list[str]) -> str:
     d, job = _load(root, args[0])
     text = (d / "decision.md").read_text()
@@ -397,51 +437,59 @@ def _escalate(root: Path, cfg: dict, job: dict, reason: str) -> None:
     _add_label(root, job["issue"], _label(cfg, "needs_human"))
 
 
+@_admitted
 def cmd_merge(root: Path, cfg: dict, args: list[str]) -> str:
     d, job = _load(root, args[0])
     if job["stage"] != "merging":
         raise F.FactoryError(f"job is in {job['stage']}, not merging")
     wt = root / job["worktree"]
-    base = cfg["base_branch"]
-    if job.get("stacked_on_pr"):
-        up = _pr_state(root, job["stacked_on_pr"])
-        if not up.get("merged"):
-            _escalate(root, cfg, job, f"Approved, but it is stacked on #{job['stacked_on_pr']}, which isn't merged yet. Merge that first, then this one.")
-            F.move(job, "needs-human", f"waiting for stacked PR #{job['stacked_on_pr']}")
+    # Keep the worktree locked across sync, the final gate and the merge decision.
+    with F.gate_worktree_lock(wt) as gate_fd:
+        base = cfg["base_branch"]
+        if job.get("stacked_on_pr"):
+            up = _pr_state(root, job["stacked_on_pr"])
+            if not up.get("merged"):
+                _escalate(root, cfg, job, f"Approved, but it is stacked on #{job['stacked_on_pr']}, which isn't merged yet. Merge that first, then this one.")
+                F.move(job, "needs-human", f"waiting for stacked PR #{job['stacked_on_pr']}")
+                F.write_job(d, job)
+                return f"{job['id']} -> needs-human (stacked on unmerged #{job['stacked_on_pr']})"
+            job.pop("stacked_on_branch", None)
+            if (_pr_state(root, job["pr"]).get("base") or {}).get("ref") != base:
+                F.gh_api(root, "PATCH", f"pulls/{job['pr']}", {"base": base}, check=False)
+        F.fetch_base(wt, base)
+        merged = F.run(["git", "merge", "--no-edit", f"origin/{base}"], cwd=wt, check=False)
+        if "CONFLICT" in merged:
+            F.run(["git", "merge", "--abort"], cwd=wt, check=False)
+            _escalate(root, cfg, job, f"The branch conflicts with `{base}`. The factory doesn't resolve conflicts; please resolve or tell it what to keep.")
+            F.move(job, "needs-human", "merge conflict with base")
             F.write_job(d, job)
-            return f"{job['id']} -> needs-human (stacked on unmerged #{job['stacked_on_pr']})"
-        job.pop("stacked_on_branch", None)
-        if (_pr_state(root, job["pr"]).get("base") or {}).get("ref") != base:
-            F.gh_api(root, "PATCH", f"pulls/{job['pr']}", {"base": base}, check=False)
-    F.fetch_base(wt, base)
-    merged = F.run(["git", "merge", "--no-edit", f"origin/{base}"], cwd=wt, check=False)
-    if "CONFLICT" in merged:
-        F.run(["git", "merge", "--abort"], cwd=wt, check=False)
-        _escalate(root, cfg, job, f"The branch conflicts with `{base}`. The factory doesn't resolve conflicts; please resolve or tell it what to keep.")
-        F.move(job, "needs-human", "merge conflict with base")
+            return f"{job['id']} -> needs-human (conflict)"
+        F.run(["git", "push", "--quiet", "origin", job["branch"]], cwd=wt)
+        gate = Path(__file__).resolve().parent / "gate"
+        # Use the same Python gate without releasing either lock.
+        try:
+            final, _ = runpy.run_path(str(gate))["run_gate"](root, cfg, d, final=True, gate_fd=gate_fd)
+        except (F.FactoryError, OSError, subprocess.TimeoutExpired):
+            final = "FAIL"
+        if final != "PASS":
+            job = F.read_job(d)
+            F.move(job, "build", "final gate after syncing with base failed")
+            F.write_job(d, job)
+            return f"{job['id']} -> build (final gate failed)"
+        changed = F.changed_files(wt, base, job)
+        ok, why = F.automerge_ok(changed, cfg["automerge_allowlist"], job["risk"], job["surfaces"])
+        if not ok:
+            _escalate(root, cfg, job, f"Approved by the factory's approver, but it can't merge without you: {why}. Merge the PR to approve it.")
+            F.move(job, "needs-human", f"auto-merge refused: {why}")
+            F.write_job(d, job)
+            return f"{job['id']} -> needs-human ({why})"
+        F.gh_api(root, "PUT", f"pulls/{job['pr']}/merge", {"merge_method": cfg["merge_method"]})
+        F.move(job, "merged", why)
         F.write_job(d, job)
-        return f"{job['id']} -> needs-human (conflict)"
-    F.run(["git", "push", "--quiet", "origin", job["branch"]], cwd=wt)
-    gate = Path(__file__).resolve().parent / "gate"
-    final = F.run([sys.executable, str(gate), job["id"], "--final"], cwd=root, check=False).strip()
-    if not final.endswith("PASS"):
-        job = F.read_job(d)
-        F.move(job, "build", "final gate after syncing with base failed")
-        F.write_job(d, job)
-        return f"{job['id']} -> build (final gate failed)"
-    changed = F.changed_files(wt, base, job)
-    ok, why = F.automerge_ok(changed, cfg["automerge_allowlist"], job["risk"], job["surfaces"])
-    if not ok:
-        _escalate(root, cfg, job, f"Approved by the factory's approver, but it can't merge without you: {why}. Merge the PR to approve it.")
-        F.move(job, "needs-human", f"auto-merge refused: {why}")
-        F.write_job(d, job)
-        return f"{job['id']} -> needs-human ({why})"
-    F.gh_api(root, "PUT", f"pulls/{job['pr']}/merge", {"merge_method": cfg["merge_method"]})
-    F.move(job, "merged", why)
-    F.write_job(d, job)
-    return f"{job['id']} -> merged (PR #{job['pr']})"
+        return f"{job['id']} -> merged (PR #{job['pr']})"
 
 
+@_admitted
 def cmd_reject(root: Path, cfg: dict, args: list[str]) -> str:
     d, job = _load(root, args[0])
     reason = sys.stdin.read().strip() or "No reason given."
@@ -470,10 +518,27 @@ def cmd_labels(root: Path, cfg: dict, args: list[str]) -> str:
     return "labels created: " + (", ".join(made) or "none (already exist)")
 
 
-RECORDABLE = {"owner_minutes": float, "cost_usd": float,
-              "escaped": lambda v: v.lower() == "true", "owner_changes": lambda v: v.lower() == "true"}
+def _record_number(value: str) -> float:
+    try:
+        number = float(value)
+        if math.isfinite(number) and number >= 0:
+            return number
+    except ValueError:
+        pass
+    raise F.FactoryError("expected a finite nonnegative number")
 
 
+def _record_bool(value: str) -> bool:
+    if value not in ("true", "false"):
+        raise F.FactoryError("expected true or false")
+    return value == "true"
+
+
+RECORDABLE = {"owner_minutes": _record_number, "cost_usd": _record_number,
+              "escaped": _record_bool, "owner_changes": _record_bool}
+
+
+@_admitted
 def cmd_record(root: Path, cfg: dict, args: list[str]) -> str:
     d, job = _load(root, args[0])
     if len(args) < 3 or args[1] not in RECORDABLE:
@@ -481,6 +546,57 @@ def cmd_record(root: Path, cfg: dict, args: list[str]) -> str:
     job[args[1]] = RECORDABLE[args[1]](args[2])
     F.write_job(d, job)
     return f"{job['id']}: {args[1]} = {job[args[1]]}"
+
+
+def cmd_observe(root: Path, cfg: dict, args: list[str]) -> str:
+    from evidence_adapter import read_reporting_job
+    from observations import MAX_EVENT_BYTES, ObservationError, append_event, decode_event_json
+
+    if len(args) != 2:
+        raise F.FactoryError("usage: job observe <id> <file|->")
+    d = F.reporting_job_dir(root, args[0])
+    try:
+        if args[1] == "-":
+            raw = sys.stdin.buffer.read(MAX_EVENT_BYTES + 1)
+        else:
+            fd = os.open(args[1], os.O_RDONLY | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as stream:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise F.FactoryError("expected a regular observation input file")
+                raw = stream.read(MAX_EVENT_BYTES + 1)
+    except OSError as exc:
+        raise F.FactoryError("cannot read observation input") from exc
+    try:
+        event = decode_event_json(raw)
+        read_reporting_job(d)
+        return json.dumps(append_event(d, event), indent=2)
+    except ObservationError as exc:
+        raise F.FactoryError(str(exc)) from exc
+
+
+def cmd_card(root: Path, cfg: dict, args: list[str]) -> str:
+    from decision_card import render_decision_card
+    from evidence_adapter import reporting_record
+    from factory_recovery import report_recovery_summary
+
+    d = F.reporting_job_dir(root, args[0])
+    if args[1:] not in ([], ["--verify-github-links"]):
+        raise F.FactoryError("usage: job card <id> [--verify-github-links]")
+    cutoff = datetime.now(timezone.utc)
+    record = reporting_record(root, cfg, d, as_of=cutoff, verify_github_links=bool(args[1:]))
+    return render_decision_card(record["job"], record["events"], record["guardrails"],
+                                report_recovery_summary(record), verified_source_url=record["url"],
+                                verified_candidate_url=record["candidate_url"], as_of=cutoff).rstrip("\n")
+
+
+def cmd_recovery(root: Path, cfg: dict, args: list[str]) -> str:
+    from evidence_adapter import reporting_record
+    from factory_recovery import report_recovery_summary
+
+    d = F.reporting_job_dir(root, args[0])
+    record = reporting_record(root, cfg, d)
+    return json.dumps({**report_recovery_summary(record), "diagnostics": record["diagnostics"],
+                       "incident_and_interruption_source_verification": "unavailable"}, indent=2)
 
 
 COMMANDS = {
@@ -491,6 +607,7 @@ COMMANDS = {
     "gap": (cmd_gap, 1), "phase": (cmd_phase, 1), "sheet": (cmd_sheet, 1),
     "tally": (cmd_tally, 1), "decide": (cmd_decide, 1),
     "merge": (cmd_merge, 1), "reject": (cmd_reject, 1), "record": (cmd_record, 3),
+    "observe": (cmd_observe, 2), "card": (cmd_card, 1), "recovery": (cmd_recovery, 1),
 }
 
 
